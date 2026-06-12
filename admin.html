@@ -218,13 +218,14 @@ async function ghFetch(method, url, body) {
   return fetch(url, opts);
 }
 
-function apiUrl(path) {
-  return `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${BRANCH}`;
+function apiUrl(path, bust = false) {
+  const cb = bust ? `&_=${Date.now()}` : "";
+  return `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${BRANCH}${cb}`;
 }
 
 /* ── LOAD VIDEOS ── */
 async function loadVideos() {
-  const r = await ghFetch("GET", apiUrl(FOLDER));
+  const r = await ghFetch("GET", apiUrl(FOLDER, true));
   if (!r.ok) { showToast("Error al cargar videos", true); return; }
   const data = await r.json();
   videos = data
@@ -366,6 +367,7 @@ async function uploadFiles(files) {
       if (r.ok) { item.classList.add("done"); } else { item.classList.add("err"); }
     } catch { item.classList.add("err"); }
   }
+  await new Promise(r => setTimeout(r, 2500));
   await loadVideos();
   document.getElementById("fileInput").value = "";
   setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 3000);
