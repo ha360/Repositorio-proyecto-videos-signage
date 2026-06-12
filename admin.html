@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin · Signage</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #0d1117; color: #e6edf3; min-height: 100vh;
+  }
+
+  /* ── LOGIN ── */
+  #loginScreen {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; gap: 16px; padding: 24px;
+  }
+  #loginScreen h1 { font-size: 22px; color: #fff; }
+  #loginScreen p  { font-size: 13px; color: #8b949e; max-width: 360px; text-align: center; line-height: 1.6; }
+  #loginScreen input {
+    width: 100%; max-width: 380px; padding: 10px 14px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; font-size: 14px; outline: none;
+  }
+  #loginScreen input:focus { border-color: #388bfd; }
+  #loginScreen button {
+    width: 100%; max-width: 380px; padding: 10px;
+    background: #238636; border: none; border-radius: 8px;
+    color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #loginScreen button:hover { background: #2ea043; }
+  #loginErr { color: #f85149; font-size: 13px; display: none; }
+
+  /* ── APP ── */
+  #app { display: none; max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 12px; }
+  .topbar h1 { font-size: 20px; }
+  .topbar-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  button { cursor: pointer; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; padding: 8px 16px; transition: background .15s; }
+  .btn-primary   { background: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-secondary { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+  .btn-secondary:hover { background: #30363d; }
+  .btn-danger    { background: #da3633; color: #fff; }
+  .btn-danger:hover { background: #f85149; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+  /* ── UPLOAD ZONE ── */
+  #dropZone {
+    border: 2px dashed #30363d; border-radius: 10px;
+    padding: 32px; text-align: center; margin-bottom: 28px;
+    color: #8b949e; transition: border-color .2s, background .2s; cursor: pointer;
+  }
+  #dropZone.over { border-color: #388bfd; background: #161b22; color: #e6edf3; }
+  #dropZone p { font-size: 14px; line-height: 1.8; }
+  #dropZone span { font-size: 12px; }
+  #fileInput { display: none; }
+
+  /* ── PROGRESS ── */
+  #uploadStatus { margin-bottom: 20px; display: none; }
+  .upload-item { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; }
+  .upload-item .bar-wrap { background: #21262d; border-radius: 4px; height: 6px; margin-top: 6px; }
+  .upload-item .bar { height: 6px; border-radius: 4px; background: #388bfd; width: 0%; transition: width .2s; }
+  .upload-item.done .bar { background: #3fb950; width: 100%; }
+  .upload-item.err  .bar { background: #f85149; width: 100%; }
+
+  /* ── VIDEO LIST ── */
+  .section-title { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+  #videoList { list-style: none; }
+  #videoList li {
+    display: flex; align-items: center; gap: 12px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 8px;
+    cursor: grab; user-select: none; transition: background .15s;
+  }
+  #videoList li:active { cursor: grabbing; }
+  #videoList li.dragging { opacity: .4; }
+  #videoList li.drag-over { border-color: #388bfd; background: #0d2044; }
+  .drag-handle { color: #484f58; font-size: 18px; flex-shrink: 0; }
+  .video-num { color: #484f58; font-size: 12px; width: 22px; text-align: right; flex-shrink: 0; }
+  .video-name { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .video-size { font-size: 12px; color: #8b949e; flex-shrink: 0; }
+
+  /* ── SAVE BAR ── */
+  #saveBar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: #161b22; border-top: 1px solid #30363d;
+    padding: 12px 24px; display: none; align-items: center;
+    justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  #saveBar.show { display: flex; }
+  #saveBar span { font-size: 13px; color: #8b949e; }
+
+  .empty-msg { text-align: center; padding: 40px; color: #484f58; font-size: 14px; }
+  .toast {
+    position: fixed; top: 20px; right: 20px;
+    background: #238636; color: #fff; padding: 10px 18px;
+    border-radius: 8px; font-size: 13px; font-weight: 600;
+    opacity: 0; transform: translateY(-8px);
+    transition: opacity .2s, transform .2s; pointer-events: none; z-index: 999;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.err { background: #da3633; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginScreen">
+  <h1>🎬 Signage Admin</h1>
+  <p>Ingresa tu token de GitHub con permisos de <strong>repo</strong> para gestionar los videos.</p>
+  <input id="tokenInput" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" />
+  <button onclick="doLogin()">Entrar</button>
+  <div id="loginErr">Token inválido. Verifica que tenga permisos de repo.</div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <div class="topbar">
+    <h1>🎬 Signage · Videos</h1>
+    <div class="topbar-actions">
+      <button class="btn-secondary" onclick="logout()">Cerrar sesión</button>
+    </div>
+  </div>
+
+  <!-- DROP ZONE -->
+  <div id="dropZone" onclick="document.getElementById('fileInput').click()">
+    <p>⬆️ Arrastra videos aquí o haz clic para seleccionar</p>
+    <span>Formatos: MP4, WebM, MOV · Máximo 100 MB por archivo</span>
+  </div>
+  <input type="file" id="fileInput" multiple accept=".mp4,.webm,.mov,.m4v" />
+
+  <!-- UPLOAD STATUS -->
+  <div id="uploadStatus"></div>
+
+  <!-- VIDEO LIST -->
+  <p class="section-title">Videos en reproducción <span id="videoCount"></span></p>
+  <ul id="videoList"></ul>
+  <div class="empty-msg" id="emptyMsg" style="display:none">
+    No hay videos todavía. Sube archivos .mp4 arriba.
+  </div>
+</div>
+
+<!-- SAVE BAR -->
+<div id="saveBar">
+  <span>Orden modificado — guarda para aplicar los cambios</span>
+  <div style="display:flex;gap:10px">
+    <button class="btn-secondary" onclick="resetOrder()">Cancelar</button>
+    <button class="btn-primary" onclick="saveOrder()">Guardar orden</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const REPO_OWNER = "ha360";
+const REPO_NAME  = "Repositorio-proyecto-videos-signage";
+const BRANCH     = "main";
+const FOLDER     = "videos";
+const VIDEO_RE   = /\.(mp4|webm|m4v|mov)$/i;
+
+let TOKEN = "";
+let videos = [];       // [{name, sha, size, download_url}]
+let order  = [];       // orden actual (nombres)
+let savedOrder = [];   // orden guardado (para cancelar)
+
+/* ── AUTH ── */
+async function doLogin() {
+  const t = document.getElementById("tokenInput").value.trim();
+  if (!t) return;
+  const ok = await testToken(t);
+  if (!ok) { document.getElementById("loginErr").style.display = "block"; return; }
+  TOKEN = t;
+  localStorage.setItem("gh_token", t);
+  showApp();
+}
+
+async function testToken(t) {
+  try {
+    const r = await ghFetch("GET", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`, t);
+    return r.ok;
+  } catch { return false; }
+}
+
+function logout() {
+  localStorage.removeItem("gh_token");
+  TOKEN = "";
+  document.getElementById("app").style.display = "none";
+  document.getElementById("loginScreen").style.display = "flex";
+  document.getElementById("tokenInput").value = "";
+}
+
+/* ── FETCH HELPER ── */
+async function ghFetch(method, url, token, body) {
+  const opts = {
+    method,
+    headers: {
+      Authorization: `token ${token || TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+    },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  return fetch(url, opts);
+}
+
+function apiUrl(path) {
+  return `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${BRANCH}`;
+}
+
+/* ── LOAD VIDEOS ── */
+async function loadVideos() {
+  const r = await ghFetch("GET", apiUrl(FOLDER));
+  if (!r.ok) { showToast("Error al cargar videos", true); return; }
+  const data = await r.json();
+  videos = data
+    .filter(x => x.type === "file" && VIDEO_RE.test(x.name))
+    .map(x => ({ name: x.name, sha: x.sha, size: x.size, download_url: x.download_url }));
+
+  // Cargar playlist.json si existe
+  let pl = null;
+  try {
+    const pr = await ghFetch("GET", apiUrl(`${FOLDER}/playlist.json`));
+    if (pr.ok) { const pd = await pr.json(); pl = JSON.parse(atob(pd.content.replace(/\n/g,""))); }
+  } catch {}
+
+  if (pl && Array.isArray(pl)) {
+    const byName = new Map(videos.map(v => [v.name, v]));
+    const ordered = [], used = new Set();
+    for (const n of pl) { if (byName.has(n)) { ordered.push(byName.get(n)); used.add(n); } }
+    const rest = videos.filter(v => !used.has(v.name)).sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true}));
+    videos = ordered.concat(rest);
+  } else {
+    videos.sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true}));
+  }
+
+  order = videos.map(v => v.name);
+  savedOrder = [...order];
+  renderList();
+}
+
+/* ── RENDER ── */
+function renderList() {
+  const ul = document.getElementById("videoList");
+  const empty = document.getElementById("emptyMsg");
+  document.getElementById("videoCount").textContent = videos.length ? `(${videos.length})` : "";
+
+  if (!videos.length) { ul.innerHTML = ""; empty.style.display = "block"; return; }
+  empty.style.display = "none";
+
+  ul.innerHTML = "";
+  videos.forEach((v, i) => {
+    const li = document.createElement("li");
+    li.dataset.name = v.name;
+    li.draggable = true;
+    li.innerHTML = `
+      <span class="drag-handle">⠿</span>
+      <span class="video-num">${i + 1}</span>
+      <span class="video-name" title="${v.name}">${v.name}</span>
+      <span class="video-size">${fmtSize(v.size)}</span>
+      <button class="btn-danger btn-sm" onclick="deleteVideo('${v.name}','${v.sha}')">Eliminar</button>
+    `;
+    li.addEventListener("dragstart", onDragStart);
+    li.addEventListener("dragover",  onDragOver);
+    li.addEventListener("dragleave", onDragLeave);
+    li.addEventListener("drop",      onDrop);
+    li.addEventListener("dragend",   onDragEnd);
+    ul.appendChild(li);
+  });
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return "";
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(0) + " KB";
+  return (bytes/1024/1024).toFixed(1) + " MB";
+}
+
+/* ── DRAG & DROP REORDER ── */
+let dragSrc = null;
+function onDragStart(e) { dragSrc = this; this.classList.add("dragging"); }
+function onDragOver(e)  { e.preventDefault(); if (this !== dragSrc) this.classList.add("drag-over"); }
+function onDragLeave()  { this.classList.remove("drag-over"); }
+function onDragEnd()    { document.querySelectorAll("#videoList li").forEach(li => li.classList.remove("dragging","drag-over")); }
+function onDrop(e) {
+  e.preventDefault();
+  if (this === dragSrc) return;
+  this.classList.remove("drag-over");
+  const ul = document.getElementById("videoList");
+  const items = [...ul.children];
+  const fromIdx = items.indexOf(dragSrc);
+  const toIdx   = items.indexOf(this);
+  if (fromIdx < toIdx) ul.insertBefore(dragSrc, this.nextSibling);
+  else                 ul.insertBefore(dragSrc, this);
+  // Renumerar
+  [...ul.children].forEach((li, i) => li.querySelector(".video-num").textContent = i + 1);
+  order = [...ul.children].map(li => li.dataset.name);
+  document.getElementById("saveBar").classList.add("show");
+}
+
+function resetOrder() {
+  order = [...savedOrder];
+  videos.sort((a,b) => order.indexOf(a.name) - order.indexOf(b.name));
+  renderList();
+  document.getElementById("saveBar").classList.remove("show");
+}
+
+async function saveOrder() {
+  const newOrder = [...document.getElementById("videoList").children].map(li => li.dataset.name);
+  // Leer SHA actual de playlist.json si existe
+  let sha = null;
+  try {
+    const r = await ghFetch("GET", apiUrl(`${FOLDER}/playlist.json`));
+    if (r.ok) { const d = await r.json(); sha = d.sha; }
+  } catch {}
+
+  const content = btoa(JSON.stringify(newOrder, null, 2));
+  const body = { message: "Update playlist order", content, branch: BRANCH };
+  if (sha) body.sha = sha;
+
+  const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/playlist.json`, TOKEN, body);
+  if (r.ok) {
+    savedOrder = newOrder;
+    order = newOrder;
+    videos.sort((a,b) => order.indexOf(a.name) - order.indexOf(b.name));
+    document.getElementById("saveBar").classList.remove("show");
+    showToast("Orden guardado ✓");
+  } else {
+    showToast("Error al guardar", true);
+  }
+}
+
+/* ── UPLOAD ── */
+document.getElementById("fileInput").addEventListener("change", e => uploadFiles(e.target.files));
+
+const dropZone = document.getElementById("dropZone");
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("over"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
+dropZone.addEventListener("drop", e => { e.preventDefault(); dropZone.classList.remove("over"); uploadFiles(e.dataTransfer.files); });
+
+async function uploadFiles(files) {
+  const validFiles = [...files].filter(f => VIDEO_RE.test(f.name));
+  if (!validFiles.length) { showToast("Sin archivos de video válidos", true); return; }
+
+  const statusEl = document.getElementById("uploadStatus");
+  statusEl.style.display = "block";
+
+  for (const file of validFiles) {
+    if (file.size > 100 * 1024 * 1024) {
+      addUploadItem(file.name, "err", "Archivo mayor a 100 MB");
+      continue;
+    }
+    const item = addUploadItem(file.name);
+    try {
+      const content = await readFileBase64(file, pct => item.querySelector(".bar").style.width = pct + "%");
+      // Ver si ya existe (para obtener el SHA)
+      let sha = null;
+      try {
+        const ex = await ghFetch("GET", apiUrl(`${FOLDER}/${file.name}`));
+        if (ex.ok) { const ed = await ex.json(); sha = ed.sha; }
+      } catch {}
+
+      const body = { message: `Upload ${file.name}`, content, branch: BRANCH };
+      if (sha) body.sha = sha;
+
+      const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, TOKEN, body);
+      if (r.ok) { item.classList.add("done"); item.querySelector(".bar").style.width = "100%"; }
+      else       { item.classList.add("err"); }
+    } catch { item.classList.add("err"); }
+  }
+
+  await loadVideos();
+  document.getElementById("fileInput").value = "";
+  setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 3000);
+}
+
+function readFileBase64(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = e => { if (e.lengthComputable) onProgress(Math.round(e.loaded/e.total*90)); };
+    reader.onload = e => { onProgress(100); resolve(e.target.result.split(",")[1]); };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function addUploadItem(name, state = "", msg = "") {
+  const statusEl = document.getElementById("uploadStatus");
+  const div = document.createElement("div");
+  div.className = "upload-item" + (state ? " " + state : "");
+  div.innerHTML = `<span>${name}${msg ? " — " + msg : ""}</span><div class="bar-wrap"><div class="bar"></div></div>`;
+  statusEl.appendChild(div);
+  return div;
+}
+
+/* ── DELETE ── */
+async function deleteVideo(name, sha) {
+  if (!confirm(`¿Eliminar "${name}"?`)) return;
+  const r = await ghFetch("DELETE", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(name)}`, TOKEN, {
+    message: `Delete ${name}`, sha, branch: BRANCH
+  });
+  if (r.ok) { showToast(`"${name}" eliminado`); await loadVideos(); }
+  else       { showToast("Error al eliminar", true); }
+}
+
+/* ── TOAST ── */
+function showToast(msg, err = false) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (err ? " err" : "");
+  setTimeout(() => t.className = "toast", 2800);
+}
+
+/* ── INIT ── */
+function showApp() {
+  document.getElementById("loginScreen").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  loadVideos();
+}
+
+const saved = localStorage.getItem("gh_token");
+if (saved) { TOKEN = saved; showApp(); }
+</script>
+</body>
+</html>
