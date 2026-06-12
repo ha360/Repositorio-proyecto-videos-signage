@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signage Player</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden; cursor: none;
+  }
+  .stage { position: fixed; inset: 0; background: #000; }
+  video {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;            /* se ajusta desde CONFIG.FIT */
+    background: #000;
+    opacity: 0;
+    transition: opacity 120ms linear;
+  }
+  video.show { opacity: 1; }
+
+  /* Mensaje en pantalla solo para estados vacíos o de error */
+  .msg {
+    position: fixed; inset: 0;
+    display: none;
+    align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px;
+    color: #cfd3da; background: #000;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    text-align: center; padding: 6vw;
+  }
+  .msg.show { display: flex; }
+  .msg h1 { margin: 0; font-size: clamp(20px, 3vw, 34px); font-weight: 600; color: #fff; }
+  .msg p  { margin: 0; font-size: clamp(14px, 1.6vw, 20px); color: #9aa0a8; max-width: 28ch; line-height: 1.5; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a4f57; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+</style>
+</head>
+<body>
+<div class="stage">
+  <video id="a" preload="auto" playsinline></video>
+  <video id="b" preload="auto" playsinline></video>
+</div>
+
+<div class="msg" id="msg">
+  <div class="dot"></div>
+  <h1 id="msgTitle">Cargando…</h1>
+  <p id="msgText"></p>
+</div>
+
+<script>
+/* ============================================================
+   CONFIGURACIÓN  —  edita SOLO estas líneas
+   ============================================================ */
+const CONFIG = {
+  GITHUB_USER: "ha360",         // <-- tu usuario de GitHub
+  GITHUB_REPO: "Repositorio-proyecto-videos-signage", // <-- el nombre del repositorio
+  BRANCH:      "main",         // rama (normalmente "main")
+  FOLDER:      "videos",       // carpeta donde van los videos
+
+  MUTED:       true,           // true = sin sonido (recomendado). false = con sonido
+  FIT:         "contain",      // "contain" = ver completo | "cover" = llenar (puede recortar)
+  REFRESH_MIN: 20,             // cada cuántos minutos revisa si hay videos nuevos
+};
+/* ============================================================
+   De aquí para abajo no necesitas tocar nada.
+   ============================================================ */
+
+const VIDEO_RE = /\.(mp4|webm|m4v|mov)$/i;
+const STALL_SECONDS = 12;        // si un video se queda "pegado", salta al siguiente
+const RETRY_MS = 15000;          // reintento si no hay lista / falla la red
+
+const elA = document.getElementById("a");
+const elB = document.getElementById("b");
+const msgBox = document.getElementById("msg");
+const msgTitle = document.getElementById("msgTitle");
+const msgText = document.getElementById("msgText");
+
+let activeEl = elA, bufferEl = elB;
+let playlist = [];               // [{name, url}]
+let pendingList = null;          // lista nueva, se aplica al cerrar un ciclo
+let idx = 0;
+let lastTime = 0, stallTimer = null;
+let starting = true;
+
+[elA, elB].forEach(v => {
+  v.muted = CONFIG.MUTED;
+  v.style.objectFit = CONFIG.FIT;
+  v.addEventListener("ended", () => { if (v === activeEl) goNext(); });
+  v.addEventListener("error", () => { if (v === activeEl) { console.warn("Error de video, salto"); goNext(); } });
+});
+
+/* Tocar la pantalla activa/desactiva el sonido (útil en sitio) */
+document.body.addEventListener("click", () => {
+  const m = !activeEl.muted;
+  activeEl.muted = m; bufferEl.muted = m;
+});
+
+function showMsg(title, text) {
+  msgTitle.textContent = title;
+  msgText.textContent = text || "";
+  msgBox.classList.add("show");
+}
+function hideMsg() { msgBox.classList.remove("show"); }
+
+/* ---------- Carga de la lista de videos ---------- */
+async function fetchList() {
+  const { GITHUB_USER: u, GITHUB_REPO: r, BRANCH: b, FOLDER: f } = CONFIG;
+
+  // 1) Listar archivos de la carpeta (GitHub API)
+  const api = `https://api.github.com/repos/${u}/${r}/contents/${f}?ref=${b}`;
+  const res = await fetch(api, { headers: { "Accept": "application/vnd.github+json" } });
+  if (!res.ok) throw new Error("GitHub API " + res.status);
+  const data = await res.json();
+  let files = data
+    .filter(x => x.type === "file" && VIDEO_RE.test(x.name))
+    .map(x => ({ name: x.name, url: x.download_url }));
+
+  // 2) Orden opcional desde videos/playlist.json
+  let order = null;
+  try {
+    const ord = await fetch(
+      `https://raw.githubusercontent.com/${u}/${r}/${b}/${f}/playlist.json?cb=${Date.now()}`,
+      { cache: "no-store" }
+    );
+    if (ord.ok) order = await ord.json();
+  } catch (_) { /* no hay archivo de orden: usamos alfabético */ }
+
+  return orderVideos(files, order);
+}
+
+function orderVideos(files, order) {
+  const sortAlpha = arr =>
+    arr.slice().sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
+
+  if (!Array.isArray(order) || !order.length) return sortAlpha(files);
+
+  const byName = new Map(files.map(f => [f.name, f]));
+  const out = [], used = new Set();
+  for (const name of order) {
+    if (byName.has(name)) { out.push(byName.get(name)); used.add(name); }
+  }
+  const rest = sortAlpha(files.filter(f => !used.has(f.name)));
+  return out.concat(rest);
+}
+
+function sameList(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((it, i) => it.name === b[i].name && it.url === b[i].url);
+}
+
+/* ---------- Reproducción ---------- */
+function prepare(el, item) {
+  if (!item) return;
+  el.loop = (playlist.length === 1);
+  el.muted = activeEl ? activeEl.muted : CONFIG.MUTED;
+  el.style.objectFit = CONFIG.FIT;
+  if (el.dataset.url !== item.url) {
+    el.dataset.url = item.url;
+    el.src = item.url;
+    el.load();
+  }
+}
+
+function playEl(el) {
+  const tryPlay = () => el.play().catch(() => {
+    // Si el navegador bloquea el autoplay con sonido, forzamos mute
+    el.muted = true;
+    el.play().catch(e => { console.warn("No se pudo reproducir:", e); scheduleStall(); });
+  });
+  tryPlay();
+}
+
+function armStallWatch() {
+  clearInterval(stallTimer);
+  lastTime = -1;
+  stallTimer = setInterval(() => {
+    if (activeEl.paused || activeEl.readyState < 2) return;
+    if (activeEl.currentTime === lastTime) {
+      // No avanzó: posible cuelgue
+      activeEl._stallCount = (activeEl._stallCount || 0) + 1;
+      if (activeEl._stallCount >= STALL_SECONDS) { activeEl._stallCount = 0; console.warn("Video colgado, salto"); goNext(); }
+    } else {
+      activeEl._stallCount = 0;
+      lastTime = activeEl.currentTime;
+    }
+  }, 1000);
+}
+function scheduleStall() { setTimeout(goNext, 1500); }
+
+function goNext() {
+  if (!playlist.length) return;
+
+  // Al cerrar el ciclo (volver al inicio) aplicamos una lista nueva si hay
+  let next = (idx + 1) % playlist.length;
+  if (next === 0 && pendingList) {
+    playlist = pendingList; pendingList = null; next = 0;
+  }
+  idx = next;
+
+  // bufferEl ya trae precargado playlist[idx]
+  prepare(bufferEl, playlist[idx]);
+
+  activeEl.classList.remove("show");
+  activeEl.pause();
+
+  bufferEl.classList.add("show");
+  playEl(bufferEl);
+
+  // intercambiar roles
+  const tmp = activeEl; activeEl = bufferEl; bufferEl = tmp;
+
+  // precargar el siguiente
+  prepare(bufferEl, playlist[(idx + 1) % playlist.length]);
+
+  armStallWatch();
+}
+
+function startPlayback() {
+  idx = 0;
+  prepare(activeEl, playlist[0]);
+  prepare(bufferEl, playlist[playlist.length > 1 ? 1 : 0]);
+  activeEl.classList.add("show");
+  bufferEl.classList.remove("show");
+  playEl(activeEl);
+  armStallWatch();
+}
+
+function applyPendingNow() {
+  if (!pendingList) return;
+  playlist = pendingList;
+  pendingList = null;
+  bufferEl.pause();
+  startPlayback();
+}
+
+/* ---------- Arranque y refresco ---------- */
+async function boot() {
+  if (starting) showMsg("Cargando…", "Buscando los videos");
+  try {
+    const list = await fetchList();
+    if (!list.length) {
+      // Sin videos: solo avisamos en el arranque. Si ya hay algo reproduciéndose,
+      // ignoramos la lista vacía y mantenemos lo último en pantalla.
+      if (starting) {
+        showMsg("No hay videos todavía", `Sube archivos a la carpeta "${CONFIG.FOLDER}" del repositorio y aparecerán aquí solos.`);
+        setTimeout(boot, RETRY_MS);
+      }
+      return;
+    }
+    if (starting) {
+      playlist = list;
+      hideMsg();
+      startPlayback();
+      starting = false;
+    } else if (!sameList(list, playlist)) {
+      // Hay cambios: se aplican al terminar el ciclo actual (sin cortar el video en curso)
+      pendingList = list;
+      // Excepción: con un solo video en bucle, "ended" nunca dispara,
+      // así que aplicamos el cambio de inmediato.
+      if (playlist.length === 1) applyPendingNow();
+    }
+  } catch (e) {
+    console.warn("Fallo al cargar la lista:", e.message);
+    if (starting) showMsg("Sin conexión", "No se pudo contactar al servidor. Reintentando…");
+    setTimeout(boot, RETRY_MS);
+  }
+}
+
+boot();
+setInterval(boot, CONFIG.REFRESH_MIN * 60 * 1000);
+
+/* Si la pantalla recupera red tras una caída, reintenta */
+window.addEventListener("online", () => { if (starting) boot(); });
+</script>
+</body>
+</html>
