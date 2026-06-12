@@ -238,19 +238,20 @@ function apiUrl(path, bust = false) {
 /* ── STORAGE ── */
 async function loadStorage() {
   try {
-    const r = await ghFetch("GET", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`);
+    const r = await ghFetch("GET", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${BRANCH}?recursive=1`);
     if (!r.ok) return;
-    const { size } = await r.json(); // size en KB
-    const usedMB  = size / 1024;
-    const totalMB = 1024; // 1 GB límite recomendado
+    const { tree } = await r.json();
+    const usedBytes = tree.filter(f => f.type === "blob").reduce((s, f) => s + (f.size || 0), 0);
+    const usedMB  = usedBytes / 1024 / 1024;
+    const totalMB = 1024;
     const pct     = Math.min(usedMB / totalMB * 100, 100);
     const bar     = document.getElementById("storageBar");
     const label   = document.getElementById("storageLabel");
     bar.style.width = pct.toFixed(1) + "%";
     bar.style.background = pct > 90 ? "#f85149" : pct > 70 ? "#d29922" : "#388bfd";
-    const fmt = mb => mb >= 1024 ? (mb/1024).toFixed(2) + " GB" : mb.toFixed(1) + " MB";
+    const fmt = mb => mb >= 1024 ? (mb / 1024).toFixed(2) + " GB" : mb.toFixed(1) + " MB";
     label.textContent = `${fmt(usedMB)} / ${fmt(totalMB)} (${pct.toFixed(1)}%)`;
-    label.style.color  = pct > 90 ? "#f85149" : pct > 70 ? "#d29922" : "#e6edf3";
+    label.style.color = pct > 90 ? "#f85149" : pct > 70 ? "#d29922" : "#e6edf3";
     document.getElementById("storageBox").style.display = "block";
   } catch {}
 }
