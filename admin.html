@@ -351,34 +351,74 @@ async function uploadFiles(files) {
   if (!validFiles.length) { showToast("Sin archivos de video válidos", true); return; }
   const statusEl = document.getElementById("uploadStatus");
   statusEl.style.display = "block";
+
   for (const file of validFiles) {
-    if (file.size > 100 * 1024 * 1024) { addUploadItem(file.name, "err", "Archivo mayor a 100 MB"); continue; }
+    if (file.size > 100 * 1024 * 1024) { addUploadItem(file.name, "err", "Mayor a 100 MB — comprime el video antes"); continue; }
     const item = addUploadItem(file.name);
+    const setLabel = txt => item.querySelector(".label").textContent = txt;
+
     try {
-      const content = await readFileBase64(file, pct => item.querySelector(".bar").style.width = pct + "%");
+      setLabel("Leyendo archivo…");
+      const content = await readFileBase64(file, pct => {
+        item.querySelector(".bar").style.width = Math.round(pct * 0.6) + "%";
+        setLabel(`Preparando… ${pct}%`);
+      });
+
+      setLabel("Verificando en GitHub…");
+      item.querySelector(".bar").style.width = "65%";
+
       let sha = null;
       try {
-        const ex = await ghFetch("GET", apiUrl(`${FOLDER}/${file.name}`));
+        const ex = await ghFetch("GET", apiUrl(`${FOLDER}/${encodeURIComponent(file.name)}`));
         if (ex.ok) { const ed = await ex.json(); sha = ed.sha; }
       } catch {}
+
+      setLabel("Subiendo a GitHub…");
+      item.querySelector(".bar").style.width = "75%";
+
       const body = { message: `Upload ${file.name}`, content, branch: BRANCH };
       if (sha) body.sha = sha;
-      const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, body);
-      if (r.ok) { item.classList.add("done"); } else { item.classList.add("err"); }
-    } catch { item.classList.add("err"); }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 min máximo
+
+      let r;
+      try {
+        r = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, {
+          method: "PUT",
+          headers: { Authorization: `token ${getToken()}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } finally { clearTimeout(timeout); }
+
+      if (r && r.ok) {
+        item.querySelector(".bar").style.width = "100%";
+        item.classList.add("done");
+        setLabel("✓ Subido");
+      } else {
+        const errData = r ? await r.json().catch(() => ({})) : {};
+        item.classList.add("err");
+        setLabel("Error: " + (errData.message || r?.status || "desconocido"));
+      }
+    } catch (e) {
+      item.classList.add("err");
+      item.querySelector(".label").textContent = e.name === "AbortError" ? "Tiempo agotado — archivo demasiado grande" : "Error de red — intenta de nuevo";
+    }
   }
+
   await new Promise(r => setTimeout(r, 2500));
   await loadVideos();
   document.getElementById("fileInput").value = "";
-  setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 3000);
+  setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 4000);
 }
 
 function readFileBase64(file, onProgress) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onprogress = e => { if (e.lengthComputable) onProgress(Math.round(e.loaded/e.total*90)); };
+    reader.onprogress = e => { if (e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100)); };
     reader.onload = e => { onProgress(100); resolve(e.target.result.split(",")[1]); };
-    reader.onerror = reject;
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
     reader.readAsDataURL(file);
   });
 }
@@ -387,7 +427,12 @@ function addUploadItem(name, state = "", msg = "") {
   const statusEl = document.getElementById("uploadStatus");
   const div = document.createElement("div");
   div.className = "upload-item" + (state ? " " + state : "");
-  div.innerHTML = `<span>${name}${msg ? " — " + msg : ""}</span><div class="bar-wrap"><div class="bar"></div></div>`;
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:8px">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</span>
+      <span class="label" style="flex-shrink:0;color:#8b949e">${msg || "Iniciando…"}</span>
+    </div>
+    <div class="bar-wrap"><div class="bar"></div></div>`;
   statusEl.appendChild(div);
   return div;
 }
