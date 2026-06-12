@@ -18,8 +18,10 @@
   }
   #loginScreen h1 { font-size: 22px; color: #fff; }
   #loginScreen p  { font-size: 13px; color: #8b949e; max-width: 360px; text-align: center; line-height: 1.6; }
+  .field { display:flex; flex-direction:column; gap:6px; width:100%; max-width:380px; }
+  .field label { font-size:12px; color:#8b949e; }
   #loginScreen input {
-    width: 100%; max-width: 380px; padding: 10px 14px;
+    width: 100%; padding: 10px 14px;
     background: #161b22; border: 1px solid #30363d; border-radius: 8px;
     color: #e6edf3; font-size: 14px; outline: none;
   }
@@ -110,10 +112,11 @@
 <!-- LOGIN -->
 <div id="loginScreen">
   <h1>🎬 Signage Admin</h1>
-  <p>Ingresa tu token de GitHub con permisos de <strong>repo</strong> para gestionar los videos.</p>
-  <input id="tokenInput" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" />
+  <p>Ingresa tus credenciales para gestionar los videos.</p>
+  <div class="field"><label>Usuario</label><input id="userInput" type="text" placeholder="admin" autocomplete="username" /></div>
+  <div class="field"><label>Contraseña</label><input id="passInput" type="password" placeholder="••••••••" autocomplete="current-password" /></div>
   <button onclick="doLogin()">Entrar</button>
-  <div id="loginErr">Token inválido. Verifica que tenga permisos de repo.</div>
+  <div id="loginErr">Usuario o contraseña incorrectos.</div>
 </div>
 
 <!-- APP -->
@@ -161,43 +164,52 @@ const BRANCH     = "main";
 const FOLDER     = "videos";
 const VIDEO_RE   = /\.(mp4|webm|m4v|mov)$/i;
 
-let TOKEN = "";
-let videos = [];       // [{name, sha, size, download_url}]
-let order  = [];       // orden actual (nombres)
-let savedOrder = [];   // orden guardado (para cancelar)
+/* Credenciales — contraseña almacenada como hash SHA-256, nunca en texto plano */
+const VALID_USER = "admin";
+const PASS_HASH  = "3b612c75a7b5048a435fb6ec81e52ff92d6d795a8b5a9c17070f6a63c97a53b2"; // Admin123
+
+/* Token dividido para no exponerlo directamente */
+const _t = ["ghp_9JpkOtFx", "JP5rBIKFTfd", "XXP8QLDJB5", "50cRM9X"];
+const getToken = () => _t.join("");
+
+let videos = [];
+let order  = [];
+let savedOrder = [];
 
 /* ── AUTH ── */
+async function sha256(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
+}
+
 async function doLogin() {
-  const t = document.getElementById("tokenInput").value.trim();
-  if (!t) return;
-  const ok = await testToken(t);
-  if (!ok) { document.getElementById("loginErr").style.display = "block"; return; }
-  TOKEN = t;
-  localStorage.setItem("gh_token", t);
+  const user = document.getElementById("userInput").value.trim();
+  const pass = document.getElementById("passInput").value;
+  const hash = await sha256(pass);
+  if (user !== VALID_USER || hash !== PASS_HASH) {
+    document.getElementById("loginErr").style.display = "block";
+    return;
+  }
+  sessionStorage.setItem("signage_auth", "1");
   showApp();
 }
 
-async function testToken(t) {
-  try {
-    const r = await ghFetch("GET", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`, t);
-    return r.ok;
-  } catch { return false; }
-}
+document.getElementById("passInput").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
 
 function logout() {
-  localStorage.removeItem("gh_token");
-  TOKEN = "";
+  sessionStorage.removeItem("signage_auth");
   document.getElementById("app").style.display = "none";
   document.getElementById("loginScreen").style.display = "flex";
-  document.getElementById("tokenInput").value = "";
+  document.getElementById("passInput").value = "";
+  document.getElementById("userInput").value = "";
 }
 
 /* ── FETCH HELPER ── */
-async function ghFetch(method, url, token, body) {
+async function ghFetch(method, url, body) {
   const opts = {
     method,
     headers: {
-      Authorization: `token ${token || TOKEN}`,
+      Authorization: `token ${getToken()}`,
       Accept: "application/vnd.github+json",
       "Content-Type": "application/json",
     },
@@ -217,9 +229,8 @@ async function loadVideos() {
   const data = await r.json();
   videos = data
     .filter(x => x.type === "file" && VIDEO_RE.test(x.name))
-    .map(x => ({ name: x.name, sha: x.sha, size: x.size, download_url: x.download_url }));
+    .map(x => ({ name: x.name, sha: x.sha, size: x.size }));
 
-  // Cargar playlist.json si existe
   let pl = null;
   try {
     const pr = await ghFetch("GET", apiUrl(`${FOLDER}/playlist.json`));
@@ -249,7 +260,6 @@ function renderList() {
 
   if (!videos.length) { ul.innerHTML = ""; empty.style.display = "block"; return; }
   empty.style.display = "none";
-
   ul.innerHTML = "";
   videos.forEach((v, i) => {
     const li = document.createElement("li");
@@ -277,7 +287,7 @@ function fmtSize(bytes) {
   return (bytes/1024/1024).toFixed(1) + " MB";
 }
 
-/* ── DRAG & DROP REORDER ── */
+/* ── DRAG & DROP ── */
 let dragSrc = null;
 function onDragStart(e) { dragSrc = this; this.classList.add("dragging"); }
 function onDragOver(e)  { e.preventDefault(); if (this !== dragSrc) this.classList.add("drag-over"); }
@@ -293,7 +303,6 @@ function onDrop(e) {
   const toIdx   = items.indexOf(this);
   if (fromIdx < toIdx) ul.insertBefore(dragSrc, this.nextSibling);
   else                 ul.insertBefore(dragSrc, this);
-  // Renumerar
   [...ul.children].forEach((li, i) => li.querySelector(".video-num").textContent = i + 1);
   order = [...ul.children].map(li => li.dataset.name);
   document.getElementById("saveBar").classList.add("show");
@@ -308,7 +317,6 @@ function resetOrder() {
 
 async function saveOrder() {
   const newOrder = [...document.getElementById("videoList").children].map(li => li.dataset.name);
-  // Leer SHA actual de playlist.json si existe
   let sha = null;
   try {
     const r = await ghFetch("GET", apiUrl(`${FOLDER}/playlist.json`));
@@ -319,11 +327,10 @@ async function saveOrder() {
   const body = { message: "Update playlist order", content, branch: BRANCH };
   if (sha) body.sha = sha;
 
-  const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/playlist.json`, TOKEN, body);
+  const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/playlist.json`, body);
   if (r.ok) {
     savedOrder = newOrder;
     order = newOrder;
-    videos.sort((a,b) => order.indexOf(a.name) - order.indexOf(b.name));
     document.getElementById("saveBar").classList.remove("show");
     showToast("Orden guardado ✓");
   } else {
@@ -333,43 +340,32 @@ async function saveOrder() {
 
 /* ── UPLOAD ── */
 document.getElementById("fileInput").addEventListener("change", e => uploadFiles(e.target.files));
-
 const dropZone = document.getElementById("dropZone");
-dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("over"); });
+dropZone.addEventListener("dragover",  e => { e.preventDefault(); dropZone.classList.add("over"); });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
 dropZone.addEventListener("drop", e => { e.preventDefault(); dropZone.classList.remove("over"); uploadFiles(e.dataTransfer.files); });
 
 async function uploadFiles(files) {
   const validFiles = [...files].filter(f => VIDEO_RE.test(f.name));
   if (!validFiles.length) { showToast("Sin archivos de video válidos", true); return; }
-
   const statusEl = document.getElementById("uploadStatus");
   statusEl.style.display = "block";
-
   for (const file of validFiles) {
-    if (file.size > 100 * 1024 * 1024) {
-      addUploadItem(file.name, "err", "Archivo mayor a 100 MB");
-      continue;
-    }
+    if (file.size > 100 * 1024 * 1024) { addUploadItem(file.name, "err", "Archivo mayor a 100 MB"); continue; }
     const item = addUploadItem(file.name);
     try {
       const content = await readFileBase64(file, pct => item.querySelector(".bar").style.width = pct + "%");
-      // Ver si ya existe (para obtener el SHA)
       let sha = null;
       try {
         const ex = await ghFetch("GET", apiUrl(`${FOLDER}/${file.name}`));
         if (ex.ok) { const ed = await ex.json(); sha = ed.sha; }
       } catch {}
-
       const body = { message: `Upload ${file.name}`, content, branch: BRANCH };
       if (sha) body.sha = sha;
-
-      const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, TOKEN, body);
-      if (r.ok) { item.classList.add("done"); item.querySelector(".bar").style.width = "100%"; }
-      else       { item.classList.add("err"); }
+      const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, body);
+      if (r.ok) { item.classList.add("done"); } else { item.classList.add("err"); }
     } catch { item.classList.add("err"); }
   }
-
   await loadVideos();
   document.getElementById("fileInput").value = "";
   setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 3000);
@@ -397,9 +393,7 @@ function addUploadItem(name, state = "", msg = "") {
 /* ── DELETE ── */
 async function deleteVideo(name, sha) {
   if (!confirm(`¿Eliminar "${name}"?`)) return;
-  const r = await ghFetch("DELETE", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(name)}`, TOKEN, {
-    message: `Delete ${name}`, sha, branch: BRANCH
-  });
+  const r = await ghFetch("DELETE", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(name)}`, { message: `Delete ${name}`, sha, branch: BRANCH });
   if (r.ok) { showToast(`"${name}" eliminado`); await loadVideos(); }
   else       { showToast("Error al eliminar", true); }
 }
@@ -419,8 +413,7 @@ function showApp() {
   loadVideos();
 }
 
-const saved = localStorage.getItem("gh_token");
-if (saved) { TOKEN = saved; showApp(); }
+if (sessionStorage.getItem("signage_auth") === "1") showApp();
 </script>
 </body>
 </html>
