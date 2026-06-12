@@ -128,6 +128,18 @@
     </div>
   </div>
 
+  <!-- STORAGE BAR -->
+  <div id="storageBox" style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 18px;margin-bottom:22px;display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;color:#8b949e">Espacio del repositorio</span>
+      <span id="storageLabel" style="font-size:13px;font-weight:600"></span>
+    </div>
+    <div style="background:#21262d;border-radius:6px;height:8px">
+      <div id="storageBar" style="height:8px;border-radius:6px;background:#388bfd;width:0%;transition:width .4s"></div>
+    </div>
+    <div style="font-size:11px;color:#484f58;margin-top:6px">Límite recomendado: 1 GB · GitHub bloquea archivos individuales &gt; 100 MB</div>
+  </div>
+
   <!-- DROP ZONE -->
   <div id="dropZone" onclick="document.getElementById('fileInput').click()">
     <p>⬆️ Arrastra videos aquí o haz clic para seleccionar</p>
@@ -221,6 +233,26 @@ async function ghFetch(method, url, body) {
 function apiUrl(path, bust = false) {
   const cb = bust ? `&_=${Date.now()}` : "";
   return `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${BRANCH}${cb}`;
+}
+
+/* ── STORAGE ── */
+async function loadStorage() {
+  try {
+    const r = await ghFetch("GET", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`);
+    if (!r.ok) return;
+    const { size } = await r.json(); // size en KB
+    const usedMB  = size / 1024;
+    const totalMB = 1024; // 1 GB límite recomendado
+    const pct     = Math.min(usedMB / totalMB * 100, 100);
+    const bar     = document.getElementById("storageBar");
+    const label   = document.getElementById("storageLabel");
+    bar.style.width = pct.toFixed(1) + "%";
+    bar.style.background = pct > 90 ? "#f85149" : pct > 70 ? "#d29922" : "#388bfd";
+    const fmt = mb => mb >= 1024 ? (mb/1024).toFixed(2) + " GB" : mb.toFixed(1) + " MB";
+    label.textContent = `${fmt(usedMB)} / ${fmt(totalMB)} (${pct.toFixed(1)}%)`;
+    label.style.color  = pct > 90 ? "#f85149" : pct > 70 ? "#d29922" : "#e6edf3";
+    document.getElementById("storageBox").style.display = "block";
+  } catch {}
 }
 
 /* ── LOAD VIDEOS ── */
@@ -408,7 +440,7 @@ async function uploadFiles(files) {
   }
 
   await new Promise(r => setTimeout(r, 2500));
-  await loadVideos();
+  await Promise.all([loadVideos(), loadStorage()]);
   document.getElementById("fileInput").value = "";
   setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 4000);
 }
@@ -441,7 +473,7 @@ function addUploadItem(name, state = "", msg = "") {
 async function deleteVideo(name, sha) {
   if (!confirm(`¿Eliminar "${name}"?`)) return;
   const r = await ghFetch("DELETE", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(name)}`, { message: `Delete ${name}`, sha, branch: BRANCH });
-  if (r.ok) { showToast(`"${name}" eliminado`); await loadVideos(); }
+  if (r.ok) { showToast(`"${name}" eliminado`); await Promise.all([loadVideos(), loadStorage()]); }
   else       { showToast("Error al eliminar", true); }
 }
 
@@ -458,6 +490,7 @@ function showApp() {
   document.getElementById("loginScreen").style.display = "none";
   document.getElementById("app").style.display = "block";
   loadVideos();
+  loadStorage();
 }
 
 if (sessionStorage.getItem("signage_auth") === "1") showApp();
