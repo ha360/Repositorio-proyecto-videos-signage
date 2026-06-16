@@ -176,69 +176,65 @@ const BRANCH     = "main";
 const FOLDER     = "videos";
 const VIDEO_RE   = /\.(mp4|webm|m4v|mov)$/i;
 
-/* Credenciales — contraseña almacenada como hash SHA-256, nunca en texto plano */
+/* Proxy seguro: el token real de GitHub vive solo en este Worker (Cloudflare),
+   nunca en este archivo. El Worker solo responde si recibe la contraseña correcta. */
+const WORKER_URL = "https://signage-admin-proxy.harold-yesid-360.workers.dev/api";
 const VALID_USER = "admin";
-const PASS_HASH  = "3b612c75a7b5048a435fb6ec81e52ff92d6d795a8b5a9c17070f6a63c97a53b2"; // Admin123
 
-/* Token dividido para no exponerlo directamente */
-const _t = ["ghp_9JpkOtFx", "JP5rBIKFTfd", "XXP8QLDJB5", "50cRM9X"];
-const getToken = () => _t.join("");
-
+let ADMIN_PASS_RUNTIME = ""; // se llena al iniciar sesión, vive solo en memoria del navegador
 let videos = [];
 let order  = [];
 let savedOrder = [];
 
 /* ── AUTH ── */
-async function sha256(str) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
+async function testAuth(pass) {
+  try {
+    const r = await fetch(`${WORKER_URL}/repos/${REPO_OWNER}/${REPO_NAME}`, { headers: { "X-Admin-Pass": pass } });
+    return r.ok;
+  } catch { return false; }
 }
 
 async function doLogin() {
   const user = document.getElementById("userInput").value.trim();
   const pass = document.getElementById("passInput").value;
-  const hash = await sha256(pass);
-  if (user !== VALID_USER || hash !== PASS_HASH) {
-    document.getElementById("loginErr").style.display = "block";
-    return;
-  }
-  sessionStorage.setItem("signage_auth", "1");
+  if (user !== VALID_USER || !pass) { document.getElementById("loginErr").style.display = "block"; return; }
+  const ok = await testAuth(pass);
+  if (!ok) { document.getElementById("loginErr").style.display = "block"; return; }
+  ADMIN_PASS_RUNTIME = pass;
+  sessionStorage.setItem("signage_pass", pass);
   showApp();
 }
 
 document.getElementById("passInput").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
 
 function logout() {
-  sessionStorage.removeItem("signage_auth");
+  sessionStorage.removeItem("signage_pass");
+  ADMIN_PASS_RUNTIME = "";
   document.getElementById("app").style.display = "none";
   document.getElementById("loginScreen").style.display = "flex";
   document.getElementById("passInput").value = "";
   document.getElementById("userInput").value = "";
 }
 
-/* ── FETCH HELPER ── */
-async function ghFetch(method, url, body) {
+/* ── FETCH HELPER (vía Worker, sin tokens en el navegador) ── */
+async function ghFetch(method, path, body) {
   const opts = {
     method,
-    headers: {
-      Authorization: `token ${getToken()}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-    },
+    headers: { "X-Admin-Pass": ADMIN_PASS_RUNTIME, "Content-Type": "application/json" },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  return fetch(url, opts);
+  return fetch(`${WORKER_URL}${path}`, opts);
 }
 
 function apiUrl(path, bust = false) {
   const cb = bust ? `&_=${Date.now()}` : "";
-  return `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${BRANCH}${cb}`;
+  return `/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${BRANCH}${cb}`;
 }
 
 /* ── STORAGE ── */
 async function loadStorage() {
   try {
-    const r = await ghFetch("GET", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${BRANCH}?recursive=1`);
+    const r = await ghFetch("GET", `/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${BRANCH}?recursive=1`);
     if (!r.ok) return;
     const { tree } = await r.json();
     const usedBytes = tree.filter(f => f.type === "blob").reduce((s, f) => s + (f.size || 0), 0);
@@ -284,6 +280,26 @@ async function loadVideos() {
   order = videos.map(v => v.name);
   savedOrder = [...order];
   renderList();
+}
+
+/* ── MANIFEST ──
+   El reproductor (index.html) lee este archivo en vez de usar la API de GitHub,
+   que tiene un límite de 60 peticiones/hora por IP y puede atascar la carga
+   en la pantalla. manifest.json se sirve desde el CDN raw.githubusercontent.com,
+   sin ese límite. */
+async function syncManifest() {
+  try {
+    const names = videos.map(v => v.name).filter(n => VIDEO_RE.test(n)).sort((a,b) => a.localeCompare(b, undefined, {numeric:true}));
+    let sha = null;
+    try {
+      const r = await ghFetch("GET", apiUrl(`${FOLDER}/manifest.json`, true));
+      if (r.ok) { const d = await r.json(); sha = d.sha; }
+    } catch {}
+    const content = btoa(JSON.stringify(names, null, 2));
+    const body = { message: "Update manifest", content, branch: BRANCH };
+    if (sha) body.sha = sha;
+    await ghFetch("PUT", `/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/manifest.json`, body);
+  } catch {}
 }
 
 /* ── RENDER ── */
@@ -361,7 +377,7 @@ async function saveOrder() {
   const body = { message: "Update playlist order", content, branch: BRANCH };
   if (sha) body.sha = sha;
 
-  const r = await ghFetch("PUT", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/playlist.json`, body);
+  const r = await ghFetch("PUT", `/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/playlist.json`, body);
   if (r.ok) {
     savedOrder = newOrder;
     order = newOrder;
@@ -417,9 +433,9 @@ async function uploadFiles(files) {
 
       let r;
       try {
-        r = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, {
+        r = await fetch(`${WORKER_URL}/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, {
           method: "PUT",
-          headers: { Authorization: `token ${getToken()}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+          headers: { "X-Admin-Pass": ADMIN_PASS_RUNTIME, "Content-Type": "application/json" },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -441,7 +457,9 @@ async function uploadFiles(files) {
   }
 
   await new Promise(r => setTimeout(r, 2500));
-  await Promise.all([loadVideos(), loadStorage()]);
+  await loadVideos();
+  await syncManifest();
+  await loadStorage();
   document.getElementById("fileInput").value = "";
   setTimeout(() => { statusEl.style.display = "none"; statusEl.innerHTML = ""; }, 4000);
 }
@@ -473,8 +491,8 @@ function addUploadItem(name, state = "", msg = "") {
 /* ── DELETE ── */
 async function deleteVideo(name, sha) {
   if (!confirm(`¿Eliminar "${name}"?`)) return;
-  const r = await ghFetch("DELETE", `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(name)}`, { message: `Delete ${name}`, sha, branch: BRANCH });
-  if (r.ok) { showToast(`"${name}" eliminado`); await Promise.all([loadVideos(), loadStorage()]); }
+  const r = await ghFetch("DELETE", `/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(name)}`, { message: `Delete ${name}`, sha, branch: BRANCH });
+  if (r.ok) { showToast(`"${name}" eliminado`); await loadVideos(); await syncManifest(); await loadStorage(); }
   else       { showToast("Error al eliminar", true); }
 }
 
@@ -487,14 +505,21 @@ function showToast(msg, err = false) {
 }
 
 /* ── INIT ── */
-function showApp() {
+async function showApp() {
   document.getElementById("loginScreen").style.display = "none";
   document.getElementById("app").style.display = "block";
-  loadVideos();
+  await loadVideos();
+  await syncManifest();
   loadStorage();
 }
 
-if (sessionStorage.getItem("signage_auth") === "1") showApp();
+const savedPass = sessionStorage.getItem("signage_pass");
+if (savedPass) {
+  testAuth(savedPass).then(ok => {
+    if (ok) { ADMIN_PASS_RUNTIME = savedPass; showApp(); }
+    else sessionStorage.removeItem("signage_pass");
+  });
+}
 </script>
 </body>
 </html>

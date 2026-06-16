@@ -107,23 +107,33 @@ function hideMsg() { msgBox.classList.remove("show"); }
 /* ---------- Carga de la lista de videos ---------- */
 async function fetchList() {
   const { GITHUB_USER: u, GITHUB_REPO: r, BRANCH: b, FOLDER: f } = CONFIG;
+  const base = `https://raw.githubusercontent.com/${u}/${r}/${b}/${f}`;
 
-  // 1) Listar archivos de la carpeta (GitHub API)
-  const api = `https://api.github.com/repos/${u}/${r}/contents/${f}?ref=${b}`;
-  const res = await fetch(api, { headers: { "Accept": "application/vnd.github+json" } });
-  if (!res.ok) throw new Error("GitHub API " + res.status);
-  const data = await res.json();
-  let files = data
-    .filter(x => x.type === "file" && VIDEO_RE.test(x.name))
-    .map(x => ({ name: x.name, url: x.download_url }));
+  // 1) Listar archivos desde manifest.json (CDN, sin límite de la API de GitHub)
+  let names = [];
+  try {
+    const res = await fetch(`${base}/manifest.json?cb=${Date.now()}`, { cache: "no-store" });
+    if (res.ok) names = await res.json();
+  } catch (_) { /* sin manifest todavía */ }
+
+  // Respaldo: si no existe manifest.json (primer uso, antes de subir algo desde el admin),
+  // se usa la API de GitHub. Esta sí tiene límite de peticiones por hora.
+  if (!Array.isArray(names) || !names.length) {
+    const api = `https://api.github.com/repos/${u}/${r}/contents/${f}?ref=${b}`;
+    const res = await fetch(api, { headers: { "Accept": "application/vnd.github+json" } });
+    if (!res.ok) throw new Error("GitHub API " + res.status);
+    const data = await res.json();
+    names = data.filter(x => x.type === "file" && VIDEO_RE.test(x.name)).map(x => x.name);
+  } else {
+    names = names.filter(n => VIDEO_RE.test(n));
+  }
+
+  const files = names.map(name => ({ name, url: `${base}/${encodeURIComponent(name)}` }));
 
   // 2) Orden opcional desde videos/playlist.json
   let order = null;
   try {
-    const ord = await fetch(
-      `https://raw.githubusercontent.com/${u}/${r}/${b}/${f}/playlist.json?cb=${Date.now()}`,
-      { cache: "no-store" }
-    );
+    const ord = await fetch(`${base}/playlist.json?cb=${Date.now()}`, { cache: "no-store" });
     if (ord.ok) order = await ord.json();
   } catch (_) { /* no hay archivo de orden: usamos alfabético */ }
 
