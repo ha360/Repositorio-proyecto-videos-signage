@@ -465,6 +465,33 @@ async function transcodeTo1080p(file, onProgress) {
   }
 }
 
+/* Remux rápido (copia streams, solo mueve el moov al inicio) para garantizar faststart */
+async function remuxFaststart(file, onProgress) {
+  const ffmpeg = await getFFmpeg(() => onProgress("loading-engine"));
+  const { fetchFile } = FFmpegUtil;
+  const inputName  = "in_"  + Date.now() + (file.name.match(/\.\w+$/)?.[0] || ".mp4");
+  const outputName = "out_" + Date.now() + ".mp4";
+
+  const progressHandler = ({ progress }) => onProgress(Math.min(99, Math.round((progress || 0) * 100)));
+  ffmpeg.on("progress", progressHandler);
+
+  try {
+    await ffmpeg.writeFile(inputName, await fetchFile(file));
+    await ffmpeg.exec([
+      "-i", inputName,
+      "-c", "copy",
+      "-movflags", "+faststart",
+      outputName,
+    ]);
+    const data = await ffmpeg.readFile(outputName);
+    return new File([data.buffer], file.name.replace(/\.\w+$/, ".mp4"), { type: "video/mp4" });
+  } finally {
+    ffmpeg.off("progress", progressHandler);
+    try { await ffmpeg.deleteFile(inputName); } catch {}
+    try { await ffmpeg.deleteFile(outputName); } catch {}
+  }
+}
+
 async function uploadFiles(files) {
   const validFiles = [...files].filter(f => VIDEO_RE.test(f.name));
   if (!validFiles.length) { showToast("Sin archivos de video válidos", true); return; }
@@ -483,16 +510,26 @@ async function uploadFiles(files) {
       try {
         const res = await getVideoResolution(file);
         if (res.width > 1920 || res.height > 1080) {
-          setLabel(`Descargando motor de optimización…`);
+          setLabel("Descargando motor de optimización…");
           item.querySelector(".bar").style.width = "5%";
           workFile = await transcodeTo1080p(file, pct => {
             if (pct === "loading-engine") { setLabel("Descargando motor de optimización…"); return; }
             item.querySelector(".bar").style.width = Math.max(5, Math.round(pct * 0.55)) + "%";
             setLabel(`Optimizando a 1080p… ${pct}%`);
           });
+        } else {
+          // Siempre aplicar faststart (mueve el moov al inicio del archivo),
+          // necesario para que la pantalla Samsung/Tizen empiece a reproducir sin descargar todo el video.
+          setLabel("Descargando motor de optimización…");
+          item.querySelector(".bar").style.width = "5%";
+          workFile = await remuxFaststart(file, pct => {
+            if (pct === "loading-engine") { setLabel("Descargando motor de optimización…"); return; }
+            item.querySelector(".bar").style.width = Math.max(5, Math.round(pct * 0.45)) + "%";
+            setLabel(`Preparando faststart… ${pct}%`);
+          });
         }
       } catch (e) {
-        console.warn("No se pudo analizar/optimizar, se sube el original:", e);
+        console.warn("No se pudo procesar con ffmpeg, se sube el original:", e);
       }
 
       setLabel("Leyendo archivo…");
@@ -532,7 +569,13 @@ async function uploadFiles(files) {
       if (r && r.ok) {
         item.querySelector(".bar").style.width = "100%";
         item.classList.add("done");
-        setLabel(workFile !== file ? "✓ Subido (optimizado a 1080p)" : "✓ Subido");
+        setLabel(
+  workFile !== file
+    ? (workFile.name !== file.name || workFile.size !== file.size
+        ? (workFile.size < file.size * 0.99 ? "✓ Subido (optimizado a 1080p + faststart)" : "✓ Subido (faststart aplicado)")
+        : "✓ Subido (faststart aplicado)")
+    : "✓ Subido"
+);
       } else {
         const errData = r ? await r.json().catch(() => ({})) : {};
         item.classList.add("err");
