@@ -35,6 +35,14 @@
   .msg p  { margin: 0; font-size: clamp(14px, 1.6vw, 20px); color: #9aa0a8; max-width: 28ch; line-height: 1.5; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a4f57; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+
+  /* HUD de diagnóstico — visible en pantalla para depuración remota */
+  #hud {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: rgba(0,0,0,0.82); color: #0f0; padding: 10px 18px;
+    font-family: monospace; font-size: clamp(13px, 1.4vw, 20px);
+    line-height: 1.7; z-index: 999; pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -42,6 +50,8 @@
   <video id="a" preload="auto" playsinline autoplay muted></video>
   <video id="b" preload="none" playsinline muted></video>
 </div>
+
+<div id="hud">▶ iniciando…</div>
 
 <div class="msg" id="msg">
   <div class="dot"></div>
@@ -76,6 +86,7 @@ const elB = document.getElementById("b");
 const msgBox = document.getElementById("msg");
 const msgTitle = document.getElementById("msgTitle");
 const msgText = document.getElementById("msgText");
+const hud = document.getElementById("hud");
 
 let activeEl = elA, bufferEl = elB;
 let playlist = [];               // [{name, url}]
@@ -83,12 +94,38 @@ let pendingList = null;          // lista nueva, se aplica al cerrar un ciclo
 let idx = 0;
 let lastTime = 0, stallTimer = null;
 let starting = true;
+let isWaiting = false;           // true mientras el video espera más datos de red
+let netStallCount = 0;           // segundos esperando red (límite: 60 s)
+const NET_STALL_LIMIT = 60;
+
+/* ── HUD de diagnóstico ── */
+const RS = ["EMPTY","IDLE","HAVE_META","HAVE_CUR","ENOUGH"];
+function updateHud(extra) {
+  const v = activeEl;
+  const name = (v.dataset.url || "").split("/").pop().replace(/%20/g," ").slice(0,40);
+  const rs = RS[v.readyState] || v.readyState;
+  const ct = v.currentTime.toFixed(1);
+  const buf = v.buffered.length ? v.buffered.end(v.buffered.length-1).toFixed(1) : "0";
+  const state = v.paused ? "PAUSED" : (isWaiting ? "BUFFERING" : "PLAYING");
+  hud.textContent = `[${idx+1}/${playlist.length}] ${name} | rs:${rs} t:${ct}s buf:${buf}s | ${state}${extra ? " | "+extra : ""}`;
+}
+setInterval(() => { if (!starting) updateHud(); }, 500);
 
 [elA, elB].forEach(v => {
   v.muted = CONFIG.MUTED;
   v.style.objectFit = CONFIG.FIT;
-  v.addEventListener("ended", () => { if (v === activeEl) goNext(); });
-  v.addEventListener("error", () => { if (v === activeEl) { console.warn("Error de video, salto"); goNext(); } });
+  v.addEventListener("ended",   () => { if (v === activeEl) goNext(); });
+  v.addEventListener("error",   () => {
+    if (v !== activeEl) return;
+    const code = v.error ? v.error.code : "?";
+    const msg  = v.error ? v.error.message : "unknown";
+    updateHud(`ERR code:${code} ${msg}`);
+    console.warn("Error de video, salto — code:", code, msg);
+    setTimeout(goNext, 2000); // pausa breve para que el HUD sea legible
+  });
+  v.addEventListener("waiting", () => { if (v === activeEl) { isWaiting = true; updateHud("WAITING-NET"); } });
+  v.addEventListener("playing", () => { if (v === activeEl) { isWaiting = false; netStallCount = 0; } });
+  v.addEventListener("stalled", () => { if (v === activeEl) updateHud("STALLED"); });
 });
 
 /* Tocar la pantalla activa/desactiva el sonido (útil en sitio) */
@@ -202,40 +239,55 @@ function armStallWatch() {
   lastTime = -1;
   notReadyCount = 0;
   pausedStuckCount = 0;
+  isWaiting = false;
+  netStallCount = 0;
   stallTimer = setInterval(() => {
     if (activeEl.readyState < 2) {
-      // El video nunca decodificó ni un frame (formato/resolución no soportada por el chip)
       notReadyCount++;
+      updateHud(`no-decode ${notReadyCount}/${NOT_READY_SECONDS}`);
       if (notReadyCount >= NOT_READY_SECONDS) {
         notReadyCount = 0;
-        console.warn("Video nunca decodificó (formato no compatible), salto:", activeEl.dataset.url);
+        console.warn("Video nunca decodificó, salto:", activeEl.dataset.url);
         goNext();
       }
       return;
     }
     if (activeEl.paused) {
-      // El video está listo (tiene frames) pero no arrancó a reproducir:
-      // típico de un bloqueo de autoplay. Intentamos forzar mute + play una vez;
-      // si sigue sin arrancar, lo damos por perdido y saltamos.
       pausedStuckCount++;
       if (pausedStuckCount >= PAUSED_STUCK_SECONDS) {
         pausedStuckCount = 0;
-        console.warn("Video listo pero pausado (autoplay bloqueado), reintentando silenciado");
         activeEl.muted = true;
-        activeEl.play().catch(() => { console.warn("Reintento falló, salto"); goNext(); });
+        activeEl.play().catch(() => goNext());
       }
       return;
     }
     pausedStuckCount = 0;
 
-    // Llegó a decodificar algo: este ciclo no fue un fracaso total
     if (activeEl.currentTime > 0) cycleHadSuccess = true;
 
     if (activeEl.currentTime === lastTime) {
-      activeEl._stallCount = (activeEl._stallCount || 0) + 1;
-      if (activeEl._stallCount >= STALL_SECONDS) { activeEl._stallCount = 0; console.warn("Video colgado, salto"); goNext(); }
+      if (isWaiting) {
+        // El decoder está esperando datos de red — ser paciente
+        netStallCount++;
+        updateHud(`buffering… ${netStallCount}/${NET_STALL_LIMIT}s`);
+        if (netStallCount >= NET_STALL_LIMIT) {
+          netStallCount = 0;
+          console.warn("Timeout de red (60 s), salto:", activeEl.dataset.url);
+          goNext();
+        }
+      } else {
+        // currentTime congelado sin waiting = el decoder se colgó
+        activeEl._stallCount = (activeEl._stallCount || 0) + 1;
+        updateHud(`freeze ${activeEl._stallCount}/${STALL_SECONDS}`);
+        if (activeEl._stallCount >= STALL_SECONDS) {
+          activeEl._stallCount = 0;
+          console.warn("Decoder congelado, salto:", activeEl.dataset.url);
+          goNext();
+        }
+      }
     } else {
       activeEl._stallCount = 0;
+      netStallCount = 0;
       lastTime = activeEl.currentTime;
     }
   }, 1000);
