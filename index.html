@@ -39,8 +39,8 @@
 </head>
 <body>
 <div class="stage">
-  <video id="a" preload="auto" playsinline></video>
-  <video id="b" preload="auto" playsinline></video>
+  <video id="a" preload="auto" playsinline autoplay muted></video>
+  <video id="b" preload="none" playsinline muted></video>
 </div>
 
 <div class="msg" id="msg">
@@ -59,7 +59,7 @@ const CONFIG = {
   BRANCH:      "main",         // rama (normalmente "main")
   FOLDER:      "videos",       // carpeta donde van los videos
 
-  MUTED:       false,          // true = sin sonido (recomendado). false = con sonido
+  MUTED:       true,           // true = sin sonido (recomendado para autoplay). false = con sonido
   FIT:         "contain",      // "contain" = ver completo | "cover" = llenar (puede recortar)
   REFRESH_MIN: 20,             // cada cuántos minutos revisa si hay videos nuevos
 };
@@ -161,11 +161,12 @@ function sameList(a, b) {
 }
 
 /* ---------- Reproducción ---------- */
-function prepare(el, item) {
+function prepare(el, item, asActive) {
   if (!item) return;
   el.loop = (playlist.length === 1);
-  el.muted = activeEl ? activeEl.muted : CONFIG.MUTED;
+  el.muted = true; // siempre muted para garantizar autoplay en Tizen
   el.style.objectFit = CONFIG.FIT;
+  el.preload = asActive ? "auto" : "none";
   if (el.dataset.url !== item.url) {
     el.dataset.url = item.url;
     el.src = item.url;
@@ -174,16 +175,23 @@ function prepare(el, item) {
 }
 
 function playEl(el) {
-  const tryPlay = () => el.play().catch(() => {
-    // Si el navegador bloquea el autoplay con sonido, forzamos mute
-    el.muted = true;
-    el.play().catch(e => { console.warn("No se pudo reproducir:", e); scheduleStall(); });
-  });
-  tryPlay();
+  el.muted = true; // asegurar muted antes del play (requerido por Chromium M94 en Tizen)
+  el.preload = "auto";
+  const p = el.play();
+  if (p && typeof p.catch === "function") {
+    p.catch(e => {
+      console.warn("play() rechazado:", e.name, e.message);
+      // DOMException NotAllowedError = política de autoplay
+      // En Samsung Tizen URL Launcher, intentamos de nuevo tras breve pausa
+      setTimeout(() => {
+        el.play().catch(() => scheduleStall());
+      }, 500);
+    });
+  }
 }
 
-const NOT_READY_SECONDS = 8;   // si el video nunca llega a decodificar un frame, se considera incompatible
-const PAUSED_STUCK_SECONDS = 5; // si está listo pero no arranca a reproducir (autoplay bloqueado)
+const NOT_READY_SECONDS = 20;  // si el video nunca llega a decodificar un frame tras 20 s, se salta
+const PAUSED_STUCK_SECONDS = 3; // si está listo pero no arranca (autoplay bloqueado), reintento rápido
 let notReadyCount = 0;
 let pausedStuckCount = 0;
 let cycleHadSuccess = false;   // ¿algún video reprodujo bien en este ciclo completo?
@@ -259,11 +267,12 @@ function goNext() {
   }
   idx = next;
 
-  // bufferEl ya trae precargado playlist[idx]
-  prepare(bufferEl, playlist[idx]);
+  // bufferEl debería tener el video ya cargado; aseguramos que sea el correcto
+  prepare(bufferEl, playlist[idx], true);
 
   activeEl.classList.remove("show");
   activeEl.pause();
+  activeEl.preload = "none"; // liberar buffer del video anterior
 
   bufferEl.classList.add("show");
   playEl(bufferEl);
@@ -271,16 +280,16 @@ function goNext() {
   // intercambiar roles
   const tmp = activeEl; activeEl = bufferEl; bufferEl = tmp;
 
-  // precargar el siguiente
-  prepare(bufferEl, playlist[(idx + 1) % playlist.length]);
+  // precargar metadata del siguiente (no todo el archivo, para no saturar la RAM del TV)
+  prepare(bufferEl, playlist[(idx + 1) % playlist.length], false);
 
   armStallWatch();
 }
 
 function startPlayback() {
   idx = 0;
-  prepare(activeEl, playlist[0]);
-  prepare(bufferEl, playlist[playlist.length > 1 ? 1 : 0]);
+  prepare(activeEl, playlist[0], true);
+  prepare(bufferEl, playlist[playlist.length > 1 ? 1 : 0], false);
   activeEl.classList.add("show");
   bufferEl.classList.remove("show");
   playEl(activeEl);
