@@ -73,10 +73,21 @@ directamente desde un repositorio de GitHub. Sin servidor, sin MagicINFO, sin co
 - **Tamaño de archivo:** GitHub no acepta archivos de más de **100 MB**.
   Comprime los videos antes de subirlos. Ejemplo con ffmpeg:
   ```
-  ffmpeg -i entrada.mov -c:v libx264 -crf 23 -preset slow \
+  ffmpeg -i entrada.mov -c:v libx264 -profile:v high -level 4.2 -crf 23 -preset slow \
          -vf "scale=1920:-2" -c:a aac -b:a 128k -movflags +faststart salida.mp4
   ```
-- **Formato:** usa **MP4 (H.264)**. Es el que mejor reproduce el navegador de Tizen.
+- **Formato y resolución (importante en pantallas Samsung QBC / Tizen 7):**
+  estas pantallas soportan video 4K en teoría, pero el chip de decodificación
+  embebido se ahoga con archivos 4K o de bitrate muy alto — el video nunca
+  llega a reproducirse y la pantalla queda en negro sin avisar. Usa siempre:
+  - **Contenedor:** MP4 con `faststart` (como en el comando de arriba)
+  - **Video:** H.264 (no HEVC), perfil High o Main, nivel ≤ 4.2
+  - **Resolución:** **1920×1080 máximo** (no subir 4K aunque la pantalla sea 4K)
+  - **Audio:** AAC-LC, estéreo, 44.1 o 48 kHz
+  - **Bitrate:** moderado, 5–10 Mbps es más que suficiente para 1080p
+  - Si un video no decodifica tras ~8 segundos, el reproductor lo salta solo
+    y sigue con el siguiente. Si **ningún** video del ciclo logra reproducirse,
+    se muestra un aviso en pantalla indicando que hay que revisar el formato.
 - **Muchas pantallas en la misma red:** la API de GitHub permite ~60 consultas por hora
   por IP pública. Si tienes muchas pantallas, sube `REFRESH_MIN` (p. ej. 30 o 60).
 - **Red con portal cautivo (login web):** algunas redes "libres" piden aceptar términos

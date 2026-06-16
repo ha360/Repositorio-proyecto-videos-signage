@@ -182,13 +182,32 @@ function playEl(el) {
   tryPlay();
 }
 
+const NOT_READY_SECONDS = 8;   // si el video nunca llega a decodificar un frame, se considera incompatible
+let notReadyCount = 0;
+let cycleHadSuccess = false;   // ¿algún video reprodujo bien en este ciclo completo?
+let consecutiveFailedCycles = 0;
+
 function armStallWatch() {
   clearInterval(stallTimer);
   lastTime = -1;
+  notReadyCount = 0;
   stallTimer = setInterval(() => {
-    if (activeEl.paused || activeEl.readyState < 2) return;
+    if (activeEl.readyState < 2) {
+      // El video nunca decodificó ni un frame (formato/resolución no soportada por el chip)
+      notReadyCount++;
+      if (notReadyCount >= NOT_READY_SECONDS) {
+        notReadyCount = 0;
+        console.warn("Video nunca decodificó (formato no compatible), salto:", activeEl.dataset.url);
+        goNext();
+      }
+      return;
+    }
+    if (activeEl.paused) return;
+
+    // Llegó a decodificar algo: este ciclo no fue un fracaso total
+    if (activeEl.currentTime > 0) cycleHadSuccess = true;
+
     if (activeEl.currentTime === lastTime) {
-      // No avanzó: posible cuelgue
       activeEl._stallCount = (activeEl._stallCount || 0) + 1;
       if (activeEl._stallCount >= STALL_SECONDS) { activeEl._stallCount = 0; console.warn("Video colgado, salto"); goNext(); }
     } else {
@@ -204,8 +223,23 @@ function goNext() {
 
   // Al cerrar el ciclo (volver al inicio) aplicamos una lista nueva si hay
   let next = (idx + 1) % playlist.length;
-  if (next === 0 && pendingList) {
-    playlist = pendingList; pendingList = null; next = 0;
+  if (next === 0) {
+    // Se completó un ciclo entero: si ningún video logró reproducirse,
+    // es señal de un problema de formato/codec, no de un video puntual.
+    if (!cycleHadSuccess) {
+      consecutiveFailedCycles++;
+      if (consecutiveFailedCycles >= 2) {
+        showMsg(
+          "Ningún video se pudo reproducir",
+          "Revisa que los videos sean MP4 (H.264, 1920x1080 o menos). Esta pantalla no decodifica resoluciones 4K o perfiles muy pesados. Reintentando…"
+        );
+      }
+    } else {
+      consecutiveFailedCycles = 0;
+      hideMsg();
+    }
+    cycleHadSuccess = false;
+    if (pendingList) { playlist = pendingList; pendingList = null; next = 0; }
   }
   idx = next;
 
