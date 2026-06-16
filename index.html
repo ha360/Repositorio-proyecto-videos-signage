@@ -183,7 +183,9 @@ function playEl(el) {
 }
 
 const NOT_READY_SECONDS = 8;   // si el video nunca llega a decodificar un frame, se considera incompatible
+const PAUSED_STUCK_SECONDS = 5; // si está listo pero no arranca a reproducir (autoplay bloqueado)
 let notReadyCount = 0;
+let pausedStuckCount = 0;
 let cycleHadSuccess = false;   // ¿algún video reprodujo bien en este ciclo completo?
 let consecutiveFailedCycles = 0;
 
@@ -191,6 +193,7 @@ function armStallWatch() {
   clearInterval(stallTimer);
   lastTime = -1;
   notReadyCount = 0;
+  pausedStuckCount = 0;
   stallTimer = setInterval(() => {
     if (activeEl.readyState < 2) {
       // El video nunca decodificó ni un frame (formato/resolución no soportada por el chip)
@@ -202,7 +205,20 @@ function armStallWatch() {
       }
       return;
     }
-    if (activeEl.paused) return;
+    if (activeEl.paused) {
+      // El video está listo (tiene frames) pero no arrancó a reproducir:
+      // típico de un bloqueo de autoplay. Intentamos forzar mute + play una vez;
+      // si sigue sin arrancar, lo damos por perdido y saltamos.
+      pausedStuckCount++;
+      if (pausedStuckCount >= PAUSED_STUCK_SECONDS) {
+        pausedStuckCount = 0;
+        console.warn("Video listo pero pausado (autoplay bloqueado), reintentando silenciado");
+        activeEl.muted = true;
+        activeEl.play().catch(() => { console.warn("Reintento falló, salto"); goNext(); });
+      }
+      return;
+    }
+    pausedStuckCount = 0;
 
     // Llegó a decodificar algo: este ciclo no fue un fracaso total
     if (activeEl.currentTime > 0) cycleHadSuccess = true;
