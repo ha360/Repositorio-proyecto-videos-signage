@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Admin · Signage</title>
+<!-- ffmpeg.wasm: transcodifica videos a 1080p en el navegador antes de subirlos,
+     para que siempre sean compatibles con el decodificador de la pantalla -->
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -143,7 +147,7 @@
   <!-- DROP ZONE -->
   <div id="dropZone" onclick="document.getElementById('fileInput').click()">
     <p>⬆️ Arrastra videos aquí o haz clic para seleccionar</p>
-    <span>Formatos: MP4, WebM, MOV · Máximo 100 MB por archivo</span>
+    <span>Formatos: MP4, WebM, MOV · Máximo 100 MB por archivo · Si el video supera 1080p se optimiza automáticamente</span>
   </div>
   <input type="file" id="fileInput" multiple accept=".mp4,.webm,.mov,.m4v" />
 
@@ -395,6 +399,72 @@ dropZone.addEventListener("dragover",  e => { e.preventDefault(); dropZone.class
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
 dropZone.addEventListener("drop", e => { e.preventDefault(); dropZone.classList.remove("over"); uploadFiles(e.dataTransfer.files); });
 
+/* ── TRANSCODIFICACIÓN AUTOMÁTICA A 1080p ──
+   Las pantallas Samsung QBC/Tizen no decodifican bien videos 4K o de bitrate alto.
+   Antes de subir, revisamos la resolución real del archivo; si supera 1080p,
+   lo convertimos en el navegador con ffmpeg.wasm a H.264 1080p/AAC, garantizando
+   que siempre llegue un archivo compatible, sin pedirle nada al usuario. */
+let ffmpegInstance = null;
+
+async function getFFmpeg(onLoadProgress) {
+  if (ffmpegInstance) return ffmpegInstance;
+  const { FFmpeg } = FFmpegWASM;
+  const { toBlobURL } = FFmpegUtil;
+  const ffmpeg = new FFmpeg();
+  if (onLoadProgress) onLoadProgress();
+  const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+  });
+  ffmpegInstance = ffmpeg;
+  return ffmpeg;
+}
+
+function getVideoResolution(file) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.onloadedmetadata = () => {
+      const res = { width: video.videoWidth, height: video.videoHeight };
+      URL.revokeObjectURL(video.src);
+      resolve(res);
+    };
+    video.onerror = () => reject(new Error("No se pudo leer el video"));
+    video.src = URL.createObjectURL(file);
+  });
+}
+
+async function transcodeTo1080p(file, onProgress) {
+  const ffmpeg = await getFFmpeg(() => onProgress("loading-engine"));
+  const { fetchFile } = FFmpegUtil;
+  const inputName  = "in_"  + Date.now() + (file.name.match(/\.\w+$/)?.[0] || ".mp4");
+  const outputName = "out_" + Date.now() + ".mp4";
+
+  const progressHandler = ({ progress }) => onProgress(Math.min(99, Math.round((progress || 0) * 100)));
+  ffmpeg.on("progress", progressHandler);
+
+  try {
+    await ffmpeg.writeFile(inputName, await fetchFile(file));
+    await ffmpeg.exec([
+      "-i", inputName,
+      "-c:v", "libx264", "-profile:v", "high", "-level", "4.2",
+      "-vf", "scale=1920:-2",
+      "-preset", "veryfast", "-crf", "23",
+      "-c:a", "aac", "-b:a", "128k",
+      "-movflags", "+faststart",
+      outputName,
+    ]);
+    const data = await ffmpeg.readFile(outputName);
+    return new File([data.buffer], file.name.replace(/\.\w+$/, ".mp4"), { type: "video/mp4" });
+  } finally {
+    ffmpeg.off("progress", progressHandler);
+    try { await ffmpeg.deleteFile(inputName); } catch {}
+    try { await ffmpeg.deleteFile(outputName); } catch {}
+  }
+}
+
 async function uploadFiles(files) {
   const validFiles = [...files].filter(f => VIDEO_RE.test(f.name));
   if (!validFiles.length) { showToast("Sin archivos de video válidos", true); return; }
@@ -407,25 +477,43 @@ async function uploadFiles(files) {
     const setLabel = txt => item.querySelector(".label").textContent = txt;
 
     try {
+      let workFile = file;
+
+      setLabel("Analizando resolución…");
+      try {
+        const res = await getVideoResolution(file);
+        if (res.width > 1920 || res.height > 1080) {
+          setLabel(`Descargando motor de optimización…`);
+          item.querySelector(".bar").style.width = "5%";
+          workFile = await transcodeTo1080p(file, pct => {
+            if (pct === "loading-engine") { setLabel("Descargando motor de optimización…"); return; }
+            item.querySelector(".bar").style.width = Math.max(5, Math.round(pct * 0.55)) + "%";
+            setLabel(`Optimizando a 1080p… ${pct}%`);
+          });
+        }
+      } catch (e) {
+        console.warn("No se pudo analizar/optimizar, se sube el original:", e);
+      }
+
       setLabel("Leyendo archivo…");
-      const content = await readFileBase64(file, pct => {
-        item.querySelector(".bar").style.width = Math.round(pct * 0.6) + "%";
+      const content = await readFileBase64(workFile, pct => {
+        item.querySelector(".bar").style.width = (55 + Math.round(pct * 0.1)) + "%";
         setLabel(`Preparando… ${pct}%`);
       });
 
       setLabel("Verificando en GitHub…");
-      item.querySelector(".bar").style.width = "65%";
+      item.querySelector(".bar").style.width = "70%";
 
       let sha = null;
       try {
-        const ex = await ghFetch("GET", apiUrl(`${FOLDER}/${encodeURIComponent(file.name)}`));
+        const ex = await ghFetch("GET", apiUrl(`${FOLDER}/${encodeURIComponent(workFile.name)}`));
         if (ex.ok) { const ed = await ex.json(); sha = ed.sha; }
       } catch {}
 
       setLabel("Subiendo a GitHub…");
-      item.querySelector(".bar").style.width = "75%";
+      item.querySelector(".bar").style.width = "80%";
 
-      const body = { message: `Upload ${file.name}`, content, branch: BRANCH };
+      const body = { message: `Upload ${workFile.name}`, content, branch: BRANCH };
       if (sha) body.sha = sha;
 
       const controller = new AbortController();
@@ -433,7 +521,7 @@ async function uploadFiles(files) {
 
       let r;
       try {
-        r = await fetch(`${WORKER_URL}/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(file.name)}`, {
+        r = await fetch(`${WORKER_URL}/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FOLDER}/${encodeURIComponent(workFile.name)}`, {
           method: "PUT",
           headers: { "X-Admin-Pass": ADMIN_PASS_RUNTIME, "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -444,7 +532,7 @@ async function uploadFiles(files) {
       if (r && r.ok) {
         item.querySelector(".bar").style.width = "100%";
         item.classList.add("done");
-        setLabel("✓ Subido");
+        setLabel(workFile !== file ? "✓ Subido (optimizado a 1080p)" : "✓ Subido");
       } else {
         const errData = r ? await r.json().catch(() => ({})) : {};
         item.classList.add("err");
