@@ -13,14 +13,10 @@
   video {
     position: absolute; inset: 0;
     width: 100%; height: 100%;
-    object-fit: contain;            /* se ajusta desde CONFIG.FIT */
+    object-fit: contain;
     background: #000;
-    opacity: 0;
-    transition: opacity 120ms linear;
   }
-  video.show { opacity: 1; }
 
-  /* Mensaje en pantalla solo para estados vacíos o de error */
   .msg {
     position: fixed; inset: 0;
     display: none;
@@ -36,10 +32,9 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a4f57; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
 
-  /* HUD de diagnóstico — visible en pantalla para depuración remota */
   #hud {
     position: fixed; bottom: 0; left: 0; right: 0;
-    background: rgba(0,0,0,0.82); color: #0f0; padding: 10px 18px;
+    background: rgba(0,0,0,0.85); color: #0f0; padding: 10px 18px;
     font-family: monospace; font-size: clamp(13px, 1.4vw, 20px);
     line-height: 1.7; z-index: 999; pointer-events: none;
   }
@@ -47,8 +42,8 @@
 </head>
 <body>
 <div class="stage">
-  <video id="a" preload="auto" playsinline autoplay muted></video>
-  <video id="b" preload="none" playsinline muted></video>
+  <!-- Un solo elemento de video: evita competencia de decodificadores hardware en Samsung Tizen -->
+  <video id="player" muted autoplay playsinline preload="auto"></video>
 </div>
 
 <div id="hud">▶ iniciando…</div>
@@ -64,100 +59,200 @@
    CONFIGURACIÓN  —  edita SOLO estas líneas
    ============================================================ */
 const CONFIG = {
-  GITHUB_USER: "ha360",         // <-- tu usuario de GitHub
-  GITHUB_REPO: "Repositorio-proyecto-videos-signage", // <-- el nombre del repositorio
-  BRANCH:      "main",         // rama (normalmente "main")
-  FOLDER:      "videos",       // carpeta donde van los videos
+  GITHUB_USER: "ha360",
+  GITHUB_REPO: "Repositorio-proyecto-videos-signage",
+  BRANCH:      "main",
+  FOLDER:      "videos",
 
-  MUTED:       true,           // true = sin sonido (recomendado para autoplay). false = con sonido
-  FIT:         "contain",      // "contain" = ver completo | "cover" = llenar (puede recortar)
-  REFRESH_MIN: 20,             // cada cuántos minutos revisa si hay videos nuevos
+  MUTED:       true,           // true = sin sonido (necesario para autoplay en Samsung Tizen)
+  FIT:         "contain",
+  REFRESH_MIN: 20,
 };
 /* ============================================================
    De aquí para abajo no necesitas tocar nada.
    ============================================================ */
 
-const VIDEO_RE = /\.(mp4|webm|m4v|mov)$/i;
-const STALL_SECONDS = 12;        // si un video se queda "pegado", salta al siguiente
-const RETRY_MS = 15000;          // reintento si no hay lista / falla la red
+const VIDEO_RE   = /\.(mp4|webm|m4v|mov)$/i;
+const RETRY_MS   = 15000;
+const NOT_READY_S = 20;  // segundos esperando primer frame antes de saltar
+const FREEZE_S    = 12;  // segundos de currentTime congelado antes de saltar
+const NET_WAIT_S  = 60;  // segundos esperando buffer de red antes de saltar
 
-const elA = document.getElementById("a");
-const elB = document.getElementById("b");
-const msgBox = document.getElementById("msg");
+const player   = document.getElementById("player");
+const msgBox   = document.getElementById("msg");
 const msgTitle = document.getElementById("msgTitle");
-const msgText = document.getElementById("msgText");
-const hud = document.getElementById("hud");
+const msgText  = document.getElementById("msgText");
+const hud      = document.getElementById("hud");
 
-let activeEl = elA, bufferEl = elB;
-let playlist = [];               // [{name, url}]
-let pendingList = null;          // lista nueva, se aplica al cerrar un ciclo
-let idx = 0;
-let lastTime = 0, stallTimer = null;
-let starting = true;
-let isWaiting = false;           // true mientras el video espera más datos de red
-let netStallCount = 0;           // segundos esperando red (límite: 60 s)
-const NET_STALL_LIMIT = 60;
+let playlist   = [];
+let pendingList = null;
+let idx        = 0;
+let starting   = true;
 
-/* ── HUD de diagnóstico ── */
-const RS = ["EMPTY","IDLE","HAVE_META","HAVE_CUR","ENOUGH"];
-function updateHud(extra) {
-  const v = activeEl;
-  const name = (v.dataset.url || "").split("/").pop().replace(/%20/g," ").slice(0,40);
-  const rs = RS[v.readyState] || v.readyState;
-  const ct = v.currentTime.toFixed(1);
-  const buf = v.buffered.length ? v.buffered.end(v.buffered.length-1).toFixed(1) : "0";
-  const state = v.paused ? "PAUSED" : (isWaiting ? "BUFFERING" : "PLAYING");
-  hud.textContent = `[${idx+1}/${playlist.length}] ${name} | rs:${rs} t:${ct}s buf:${buf}s | ${state}${extra ? " | "+extra : ""}`;
+let stallTimer    = null;
+let lastTime      = -1;
+let isWaiting     = false;
+let notReadyCnt   = 0;
+let pausedCnt     = 0;
+let freezeCnt     = 0;
+let netWaitCnt    = 0;
+let cycleSuccess  = false;
+let failedCycles  = 0;
+
+/* ── Aplicar config inicial ── */
+player.muted       = CONFIG.MUTED;
+player.style.objectFit = CONFIG.FIT;
+
+/* ── HUD ── */
+const RS = ["EMPTY","IDLE","META","CUR","ENOUGH"];
+function hudUpdate(tag) {
+  const name = (player.dataset.url || "").split("/").pop().replace(/%20/g," ").slice(0,38);
+  const rs   = RS[player.readyState] || player.readyState;
+  const ct   = player.currentTime.toFixed(1);
+  const buf  = player.buffered.length ? player.buffered.end(player.buffered.length-1).toFixed(1) : "0";
+  const st   = player.paused ? "PAUSED" : (isWaiting ? "BUFFERING" : "PLAYING");
+  hud.textContent = `[${idx+1}/${playlist.length}] ${name} | rs:${rs} t:${ct}s buf:${buf}s | ${st}${tag ? " | "+tag : ""}`;
 }
-setInterval(() => { if (!starting) updateHud(); }, 500);
+setInterval(() => { if (!starting) hudUpdate(); }, 500);
 
-[elA, elB].forEach(v => {
-  v.muted = CONFIG.MUTED;
-  v.style.objectFit = CONFIG.FIT;
-  v.addEventListener("ended",   () => { if (v === activeEl) goNext(); });
-  v.addEventListener("error",   () => {
-    if (v !== activeEl) return;
-    const code = v.error ? v.error.code : "?";
-    const msg  = v.error ? v.error.message : "unknown";
-    updateHud(`ERR code:${code} ${msg}`);
-    console.warn("Error de video, salto — code:", code, msg);
-    setTimeout(goNext, 2000); // pausa breve para que el HUD sea legible
-  });
-  v.addEventListener("waiting", () => { if (v === activeEl) { isWaiting = true; updateHud("WAITING-NET"); } });
-  v.addEventListener("playing", () => { if (v === activeEl) { isWaiting = false; netStallCount = 0; } });
-  v.addEventListener("stalled", () => { if (v === activeEl) updateHud("STALLED"); });
+/* ── Eventos del player ── */
+player.addEventListener("ended",   () => advance());
+player.addEventListener("error",   () => {
+  const code = player.error ? player.error.code : "?";
+  const msg  = player.error ? player.error.message : "";
+  hudUpdate(`ERR ${code} ${msg}`);
+  setTimeout(advance, 2000);
 });
+player.addEventListener("waiting", () => { isWaiting = true;  hudUpdate("WAITING-NET"); });
+player.addEventListener("playing", () => { isWaiting = false; netWaitCnt = 0; });
+player.addEventListener("stalled", () => { hudUpdate("STALLED"); });
 
-/* Tocar la pantalla activa/desactiva el sonido (útil en sitio) */
-document.body.addEventListener("click", () => {
-  const m = !activeEl.muted;
-  activeEl.muted = m; bufferEl.muted = m;
-});
+/* Toque en pantalla activa/desactiva sonido */
+document.body.addEventListener("click", () => { player.muted = !player.muted; });
 
-function showMsg(title, text) {
-  msgTitle.textContent = title;
-  msgText.textContent = text || "";
-  msgBox.classList.add("show");
+/* ── Mensajes ── */
+function showMsg(t, p) { msgTitle.textContent = t; msgText.textContent = p || ""; msgBox.classList.add("show"); }
+function hideMsg()      { msgBox.classList.remove("show"); }
+
+/* ── Carga del video actual ── */
+function loadCurrent() {
+  clearInterval(stallTimer);
+  lastTime    = -1;
+  isWaiting   = false;
+  notReadyCnt = 0;
+  pausedCnt   = 0;
+  freezeCnt   = 0;
+  netWaitCnt  = 0;
+
+  const item = playlist[idx];
+  if (!item) return;
+
+  /* Liberar decodificador anterior antes de cargar el nuevo */
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+
+  /* Pequeña pausa para que Samsung libere el HW decoder */
+  setTimeout(() => {
+    player.src = item.url;
+    player.dataset.url = item.url;
+    player.load();
+
+    const p = player.play();
+    if (p && p.catch) p.catch(() => {
+      setTimeout(() => player.play().catch(() => scheduleSkip(1500)), 500);
+    });
+
+    armStallWatch();
+  }, 300);
 }
-function hideMsg() { msgBox.classList.remove("show"); }
 
-/* ---------- Carga de la lista de videos ---------- */
+/* ── Vigilancia de stall ── */
+function armStallWatch() {
+  clearInterval(stallTimer);
+  stallTimer = setInterval(() => {
+    /* 1. Nunca llegó a decodificar frames */
+    if (player.readyState < 2) {
+      notReadyCnt++;
+      hudUpdate(`no-decode ${notReadyCnt}/${NOT_READY_S}`);
+      if (notReadyCnt >= NOT_READY_S) advance();
+      return;
+    }
+    /* 2. Tiene frames pero no arranca (autoplay bloqueado) */
+    if (player.paused) {
+      pausedCnt++;
+      hudUpdate(`paused ${pausedCnt}/3`);
+      if (pausedCnt >= 3) {
+        pausedCnt = 0;
+        player.muted = true;
+        player.play().catch(() => advance());
+      }
+      return;
+    }
+    pausedCnt = 0;
+    if (player.currentTime > 0) cycleSuccess = true;
+
+    /* 3. currentTime no avanza */
+    if (player.currentTime === lastTime) {
+      if (isWaiting) {
+        netWaitCnt++;
+        hudUpdate(`buffering ${netWaitCnt}/${NET_WAIT_S}s`);
+        if (netWaitCnt >= NET_WAIT_S) advance();
+      } else {
+        freezeCnt++;
+        hudUpdate(`freeze ${freezeCnt}/${FREEZE_S}`);
+        if (freezeCnt >= FREEZE_S) advance();
+      }
+    } else {
+      freezeCnt  = 0;
+      netWaitCnt = 0;
+      lastTime   = player.currentTime;
+    }
+  }, 1000);
+}
+
+function scheduleSkip(ms) { setTimeout(advance, ms); }
+
+/* ── Avanzar al siguiente video ── */
+function advance() {
+  if (!playlist.length) return;
+  clearInterval(stallTimer);
+
+  let next = (idx + 1) % playlist.length;
+  if (next === 0) {
+    if (!cycleSuccess) {
+      failedCycles++;
+      if (failedCycles >= 2) showMsg("Ningún video pudo reproducirse", "Revisa que los videos sean MP4 H.264. Reintentando…");
+    } else {
+      failedCycles = 0;
+      hideMsg();
+    }
+    cycleSuccess = false;
+    if (pendingList) { playlist = pendingList; pendingList = null; next = 0; }
+  }
+  idx = next;
+  loadCurrent();
+}
+
+/* ── Arranque ── */
+function startPlayback() {
+  idx = 0;
+  loadCurrent();
+}
+
+/* ── Fetch de la lista ── */
 async function fetchList() {
   const { GITHUB_USER: u, GITHUB_REPO: r, BRANCH: b, FOLDER: f } = CONFIG;
   const base = `https://raw.githubusercontent.com/${u}/${r}/${b}/${f}`;
-
-  // 1) Listar archivos desde manifest.json (CDN, sin límite de la API de GitHub)
   let names = [];
   try {
     const res = await fetch(`${base}/manifest.json?cb=${Date.now()}`, { cache: "no-store" });
     if (res.ok) names = await res.json();
-  } catch (_) { /* sin manifest todavía */ }
+  } catch (_) {}
 
-  // Respaldo: si no existe manifest.json (primer uso, antes de subir algo desde el admin),
-  // se usa la API de GitHub. Esta sí tiene límite de peticiones por hora.
   if (!Array.isArray(names) || !names.length) {
     const api = `https://api.github.com/repos/${u}/${r}/contents/${f}?ref=${b}`;
-    const res = await fetch(api, { headers: { "Accept": "application/vnd.github+json" } });
+    const res = await fetch(api, { headers: { Accept: "application/vnd.github+json" } });
     if (!res.ok) throw new Error("GitHub API " + res.status);
     const data = await res.json();
     names = data.filter(x => x.type === "file" && VIDEO_RE.test(x.name)).map(x => x.name);
@@ -165,234 +260,52 @@ async function fetchList() {
     names = names.filter(n => VIDEO_RE.test(n));
   }
 
-  const files = names.map(name => ({ name, url: `${base}/${encodeURIComponent(name)}` }));
+  const files = names.map(n => ({ name: n, url: `${base}/${encodeURIComponent(n)}` }));
 
-  // 2) Orden opcional desde videos/playlist.json
   let order = null;
   try {
     const ord = await fetch(`${base}/playlist.json?cb=${Date.now()}`, { cache: "no-store" });
     if (ord.ok) order = await ord.json();
-  } catch (_) { /* no hay archivo de orden: usamos alfabético */ }
+  } catch (_) {}
 
   return orderVideos(files, order);
 }
 
 function orderVideos(files, order) {
-  const sortAlpha = arr =>
-    arr.slice().sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
-
-  if (!Array.isArray(order) || !order.length) return sortAlpha(files);
-
-  const byName = new Map(files.map(f => [f.name, f]));
+  const alpha = arr => arr.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!Array.isArray(order) || !order.length) return alpha(files);
+  const map = new Map(files.map(f => [f.name, f]));
   const out = [], used = new Set();
-  for (const name of order) {
-    if (byName.has(name)) { out.push(byName.get(name)); used.add(name); }
-  }
-  const rest = sortAlpha(files.filter(f => !used.has(f.name)));
-  return out.concat(rest);
+  for (const n of order) { if (map.has(n)) { out.push(map.get(n)); used.add(n); } }
+  return out.concat(alpha(files.filter(f => !used.has(f.name))));
 }
 
 function sameList(a, b) {
-  if (a.length !== b.length) return false;
-  return a.every((it, i) => it.name === b[i].name && it.url === b[i].url);
+  return a.length === b.length && a.every((x, i) => x.url === b[i].url);
 }
 
-/* ---------- Reproducción ---------- */
-function prepare(el, item, asActive) {
-  if (!item) return;
-  el.loop = (playlist.length === 1);
-  el.muted = true; // siempre muted para garantizar autoplay en Tizen
-  el.style.objectFit = CONFIG.FIT;
-  el.preload = asActive ? "auto" : "none";
-  if (el.dataset.url !== item.url) {
-    el.dataset.url = item.url;
-    el.src = item.url;
-    el.load();
-  }
-}
-
-function playEl(el) {
-  el.muted = true; // asegurar muted antes del play (requerido por Chromium M94 en Tizen)
-  el.preload = "auto";
-  const p = el.play();
-  if (p && typeof p.catch === "function") {
-    p.catch(e => {
-      console.warn("play() rechazado:", e.name, e.message);
-      // DOMException NotAllowedError = política de autoplay
-      // En Samsung Tizen URL Launcher, intentamos de nuevo tras breve pausa
-      setTimeout(() => {
-        el.play().catch(() => scheduleStall());
-      }, 500);
-    });
-  }
-}
-
-const NOT_READY_SECONDS = 20;  // si el video nunca llega a decodificar un frame tras 20 s, se salta
-const PAUSED_STUCK_SECONDS = 3; // si está listo pero no arranca (autoplay bloqueado), reintento rápido
-let notReadyCount = 0;
-let pausedStuckCount = 0;
-let cycleHadSuccess = false;   // ¿algún video reprodujo bien en este ciclo completo?
-let consecutiveFailedCycles = 0;
-
-function armStallWatch() {
-  clearInterval(stallTimer);
-  lastTime = -1;
-  notReadyCount = 0;
-  pausedStuckCount = 0;
-  isWaiting = false;
-  netStallCount = 0;
-  stallTimer = setInterval(() => {
-    if (activeEl.readyState < 2) {
-      notReadyCount++;
-      updateHud(`no-decode ${notReadyCount}/${NOT_READY_SECONDS}`);
-      if (notReadyCount >= NOT_READY_SECONDS) {
-        notReadyCount = 0;
-        console.warn("Video nunca decodificó, salto:", activeEl.dataset.url);
-        goNext();
-      }
-      return;
-    }
-    if (activeEl.paused) {
-      pausedStuckCount++;
-      if (pausedStuckCount >= PAUSED_STUCK_SECONDS) {
-        pausedStuckCount = 0;
-        activeEl.muted = true;
-        activeEl.play().catch(() => goNext());
-      }
-      return;
-    }
-    pausedStuckCount = 0;
-
-    if (activeEl.currentTime > 0) cycleHadSuccess = true;
-
-    if (activeEl.currentTime === lastTime) {
-      if (isWaiting) {
-        // El decoder está esperando datos de red — ser paciente
-        netStallCount++;
-        updateHud(`buffering… ${netStallCount}/${NET_STALL_LIMIT}s`);
-        if (netStallCount >= NET_STALL_LIMIT) {
-          netStallCount = 0;
-          console.warn("Timeout de red (60 s), salto:", activeEl.dataset.url);
-          goNext();
-        }
-      } else {
-        // currentTime congelado sin waiting = el decoder se colgó
-        activeEl._stallCount = (activeEl._stallCount || 0) + 1;
-        updateHud(`freeze ${activeEl._stallCount}/${STALL_SECONDS}`);
-        if (activeEl._stallCount >= STALL_SECONDS) {
-          activeEl._stallCount = 0;
-          console.warn("Decoder congelado, salto:", activeEl.dataset.url);
-          goNext();
-        }
-      }
-    } else {
-      activeEl._stallCount = 0;
-      netStallCount = 0;
-      lastTime = activeEl.currentTime;
-    }
-  }, 1000);
-}
-function scheduleStall() { setTimeout(goNext, 1500); }
-
-function goNext() {
-  if (!playlist.length) return;
-
-  // Al cerrar el ciclo (volver al inicio) aplicamos una lista nueva si hay
-  let next = (idx + 1) % playlist.length;
-  if (next === 0) {
-    // Se completó un ciclo entero: si ningún video logró reproducirse,
-    // es señal de un problema de formato/codec, no de un video puntual.
-    if (!cycleHadSuccess) {
-      consecutiveFailedCycles++;
-      if (consecutiveFailedCycles >= 2) {
-        showMsg(
-          "Ningún video se pudo reproducir",
-          "Revisa que los videos sean MP4 (H.264, 1920x1080 o menos). Esta pantalla no decodifica resoluciones 4K o perfiles muy pesados. Reintentando…"
-        );
-      }
-    } else {
-      consecutiveFailedCycles = 0;
-      hideMsg();
-    }
-    cycleHadSuccess = false;
-    if (pendingList) { playlist = pendingList; pendingList = null; next = 0; }
-  }
-  idx = next;
-
-  // bufferEl debería tener el video ya cargado; aseguramos que sea el correcto
-  prepare(bufferEl, playlist[idx], true);
-
-  activeEl.classList.remove("show");
-  activeEl.pause();
-  activeEl.preload = "none"; // liberar buffer del video anterior
-
-  bufferEl.classList.add("show");
-  playEl(bufferEl);
-
-  // intercambiar roles
-  const tmp = activeEl; activeEl = bufferEl; bufferEl = tmp;
-
-  // precargar metadata del siguiente (no todo el archivo, para no saturar la RAM del TV)
-  prepare(bufferEl, playlist[(idx + 1) % playlist.length], false);
-
-  armStallWatch();
-}
-
-function startPlayback() {
-  idx = 0;
-  prepare(activeEl, playlist[0], true);
-  prepare(bufferEl, playlist[playlist.length > 1 ? 1 : 0], false);
-  activeEl.classList.add("show");
-  bufferEl.classList.remove("show");
-  playEl(activeEl);
-  armStallWatch();
-}
-
-function applyPendingNow() {
-  if (!pendingList) return;
-  playlist = pendingList;
-  pendingList = null;
-  bufferEl.pause();
-  startPlayback();
-}
-
-/* ---------- Arranque y refresco ---------- */
 async function boot() {
   if (starting) showMsg("Cargando…", "Buscando los videos");
   try {
     const list = await fetchList();
     if (!list.length) {
-      // Sin videos: solo avisamos en el arranque. Si ya hay algo reproduciéndose,
-      // ignoramos la lista vacía y mantenemos lo último en pantalla.
-      if (starting) {
-        showMsg("No hay videos todavía", `Sube archivos a la carpeta "${CONFIG.FOLDER}" del repositorio y aparecerán aquí solos.`);
-        setTimeout(boot, RETRY_MS);
-      }
+      if (starting) { showMsg("No hay videos todavía", `Sube archivos MP4 a la carpeta "${CONFIG.FOLDER}" del repositorio.`); setTimeout(boot, RETRY_MS); }
       return;
     }
     if (starting) {
-      playlist = list;
-      hideMsg();
-      startPlayback();
-      starting = false;
+      playlist = list; hideMsg(); startPlayback(); starting = false;
     } else if (!sameList(list, playlist)) {
-      // Hay cambios: se aplican al terminar el ciclo actual (sin cortar el video en curso)
       pendingList = list;
-      // Excepción: con un solo video en bucle, "ended" nunca dispara,
-      // así que aplicamos el cambio de inmediato.
-      if (playlist.length === 1) applyPendingNow();
     }
   } catch (e) {
-    console.warn("Fallo al cargar la lista:", e.message);
-    if (starting) showMsg("Sin conexión", "No se pudo contactar al servidor. Reintentando…");
+    console.warn("fetchList error:", e.message);
+    if (starting) showMsg("Sin conexión", "Reintentando…");
     setTimeout(boot, RETRY_MS);
   }
 }
 
 boot();
 setInterval(boot, CONFIG.REFRESH_MIN * 60 * 1000);
-
-/* Si la pantalla recupera red tras una caída, reintenta */
 window.addEventListener("online", () => { if (starting) boot(); });
 </script>
 </body>
